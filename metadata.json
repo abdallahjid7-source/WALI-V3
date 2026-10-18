@@ -1,0 +1,8 @@
+{
+  "name": "Remix Wali Songhaï 06092026",
+  "description": "Jeu traditionnel Wali Songhaï de Tombouctou (Mali) - Moteur de règles pur et Android natif.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

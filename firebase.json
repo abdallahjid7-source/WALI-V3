@@ -1,0 +1,8 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-android-wali-97f9abbe-450c-40da-94b4-fdaf5e0990d3",
+      "rules": "firestore.rules"
+    }
+  ]
+}

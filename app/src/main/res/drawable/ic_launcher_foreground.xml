@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ombre portée au sol sous le socle du monument -->
+    <path
+        android:pathData="M34,81.5 C34,80.2 74,80.2 74,81.5 C74,82.8 34,82.8 34,81.5 Z"
+        android:fillColor="#33000000" />
+
+    <!-- Socle / Podium inférieur (architecture en banco massif) -->
+    <path
+        android:pathData="M36,77.5 L72,77.5 L72,81.5 L36,81.5 Z"
+        android:fillColor="#3A2011" />
+
+    <!-- Liseré doré de transition sur la moulure du socle -->
+    <path
+        android:pathData="M35,76.5 L73,76.5 L73,77.5 L35,77.5 Z"
+        android:fillColor="#C69A45" />
+
+    <!-- Étage supérieur du socle -->
+    <path
+        android:pathData="M39,73 L69,73 L69,76.5 L39,76.5 Z"
+        android:fillColor="#4A2C18" />
+
+    <!-- Minaret / Obélisque de Tombouctou - Facette gauche (teinte banco chaude) -->
+    <path
+        android:pathData="M54,29 L51,31 L49.5,36 L46,52 L42,73 L54,73 Z"
+        android:fillColor="#5A351E" />
+
+    <!-- Minaret / Obélisque de Tombouctou - Facette droite (ombre architecturale profonde) -->
+    <path
+        android:pathData="M54,29 L57,31 L58.5,36 L62,52 L66,73 L54,73 Z"
+        android:fillColor="#422513" />
+
+    <!-- Sommet conique sahélien du minaret -->
+    <path
+        android:pathData="M54,28 L50.5,31.5 L57.5,31.5 Z"
+        android:fillColor="#4A2C18" />
+
+    <!-- BOIS SAILLANTS HORIZONTAUX (TORONS TRADITIONNELS DE TOMBOUCTOU) -->
+    <!-- Rangée 1 (base inférieure) -->
+    <path
+        android:pathData="M38,66.2 L70,66.2 L70,67.8 L38,67.8 Z"
+        android:fillColor="#C69A45" />
+    <path
+        android:pathData="M38,67.8 L70,67.8 L70,68.4 L38,68.4 Z"
+        android:fillColor="#241208" />
+
+    <!-- Rangée 2 (mi-hauteur inférieure) -->
+    <path
+        android:pathData="M41,57.7 L67,57.7 L67,59.3 L41,59.3 Z"
+        android:fillColor="#C69A45" />
+    <path
+        android:pathData="M41,59.3 L67,59.3 L67,59.9 L41,59.9 Z"
+        android:fillColor="#241208" />
+
+    <!-- Rangée 3 (mi-hauteur supérieure) -->
+    <path
+        android:pathData="M43.5,49.2 L64.5,49.2 L64.5,50.8 L43.5,50.8 Z"
+        android:fillColor="#C69A45" />
+    <path
+        android:pathData="M43.5,50.8 L64.5,50.8 L64.5,51.4 L43.5,51.4 Z"
+        android:fillColor="#241208" />
+
+    <!-- Rangée 4 (étage supérieur) -->
+    <path
+        android:pathData="M46,40.7 L62,40.7 L62,42.3 L46,42.3 Z"
+        android:fillColor="#C69A45" />
+    <path
+        android:pathData="M46,42.3 L62,42.3 L62,42.9 L46,42.9 Z"
+        android:fillColor="#241208" />
+
+    <!-- Meurtrière / Niche voûtée d'aération traditionnelle -->
+    <path
+        android:pathData="M52.5,60.5 C52.5,59 55.5,59 55.5,60.5 L55.5,65 L52.5,65 Z"
+        android:fillColor="#201007" />
+    <path
+        android:pathData="M52,65 L56,65 L56,65.8 L52,65.8 Z"
+        android:fillColor="#C69A45" />
+
+    <!-- ÉPI DE FAÎTAGE ET CROISSANT SAHÉLIEN AU SOMMET -->
+    <!-- Tige or du fleuron -->
+    <path
+        android:pathData="M53.5,26.5 L54.5,26.5 L54.5,29 L53.5,29 Z"
+        android:fillColor="#C69A45" />
+
+    <!-- Sphère/Œuf de faîtage en banco et or -->
+    <path
+        android:pathData="M54,26.2 A1.5,1.5 0 1,0 54,29.2 A1.5,1.5 0 1,0 54,26.2 Z"
+        android:fillColor="#C69A45" />
+
+    <!-- Croissant de lune stylisé -->
+    <path
+        android:pathData="M54,22.2 C55.8,22.2 57.2,23.5 57.2,25.2 C57.2,26.7 56,27.8 54.4,28 C55.6,27.3 56.3,26.2 56.3,25.2 C56.3,23.9 55.3,22.9 54,22.2 Z"
+        android:fillColor="#C69A45" />
+
+    <!-- Étoile dorée discrète au pinacle -->
+    <path
+        android:pathData="M54,20.4 L54.5,21.4 L55.6,21.4 L54.7,22.1 L55.1,23.1 L54,22.4 L52.9,23.1 L53.3,22.1 L52.4,21.4 L53.5,21.4 Z"
+        android:fillColor="#FFDE8A" />
+
+</vector>

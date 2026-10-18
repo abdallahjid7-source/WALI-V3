@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- PARTIES EN LIGNE (WALI SONGHAÏ) ---
+    match /games/{gameId} {
+      // Lecture :
+      // - Consultation des parties publiques en attente dans le lobby
+      //   et observation en temps réel de la partie à laquelle les joueurs participent.
+      allow read: if true;
+
+      // Création :
+      // - Un joueur (authentifié ou anonyme) peut créer un salon
+      // - Il doit être désigné avec un creatorUid non vide
+      // - Le statut doit impérativement être 'waiting'
+      allow create: if request.resource.data.creatorUid is string
+                    && request.resource.data.creatorUid.size() > 0
+                    && request.resource.data.status == 'waiting'
+                    && (request.auth == null || request.resource.data.creatorUid == request.auth.uid);
+
+      // Mise à jour :
+      // Deux cas autorisés :
+      // 1. Un second joueur rejoint une partie en attente (status -> 'ongoing', opponentUid défini)
+      // 2. Un joueur participant met à jour l'état du jeu ou déclare un abandon/forfait
+      allow update: if (
+        // Cas 1 : Rejoindre une partie
+        (resource.data.status == 'waiting'
+         && request.resource.data.status == 'ongoing'
+         && request.resource.data.opponentUid is string
+         && request.resource.data.opponentUid.size() > 0
+         && resource.data.creatorUid != request.resource.data.opponentUid)
+        ||
+        // Cas 2 : Action de jeu ou abandon par l'un des deux participants enregistrés
+        (resource.data.status == 'ongoing'
+         && request.resource.data.creatorUid == resource.data.creatorUid
+         && request.resource.data.opponentUid == resource.data.opponentUid)
+      );
+
+      // Suppression :
+      // - Seul un salon en attente ('waiting') peut être annulé/supprimé
+      allow delete: if resource.data.status == 'waiting'
+                    && (request.auth == null || resource.data.creatorUid == request.auth.uid);
+
+      // --- SOUS-COLLECTION CHAT : MESSAGES ÉPHÉMÈRES ---
+      match /messages/{messageId} {
+        // Lecture : Messages du salon
+        allow read: if true;
+
+        // Création :
+        // - L'expéditeur doit avoir un senderUid valide
+        // - Le texte est obligatoirement une chaîne non vide limitée à 200 caractères
+        allow create: if request.resource.data.senderUid is string
+                      && request.resource.data.senderUid.size() > 0
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0
+                      && request.resource.data.text.size() <= 200;
+
+        // Modification : Strictement interdite pour garantir l'intégrité des échanges
+        allow update: if false;
+
+        // Suppression : Nettoyage des messages éphémères du salon
+        allow delete: if true;
+      }
+    }
+
+    // --- COLLECTION SIGNALEMENTS : MODÉRATION ET SÉCURITÉ DES JOUEURS ---
+    match /reports/{reportId} {
+      // Création : Tout joueur peut soumettre un signalement
+      allow create: if request.resource.data.reporterUid is string
+                    && request.resource.data.reporterUid.size() > 0
+                    && request.resource.data.reason is string
+                    && request.resource.data.reason.size() <= 300;
+
+      // Lecture, modification et suppression : Réservées à la console Firebase
+      allow read, update, delete: if false;
+    }
+  }
+}

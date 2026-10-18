@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Fond dégradé sable chaud et terre cuite du Sahel -->
+    <path
+        android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#E6C898" />
+                <item android:offset="0.45" android:color="#D9B27C" />
+                <item android:offset="1.0" android:color="#9B6A3C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Disque solaire doux en arrière-plan pour sublimer la silhouette -->
+    <path
+        android:pathData="M54,23 A23,23 0 1,0 54,69 A23,23 0 1,0 54,23 Z"
+        android:fillColor="#22FFE8BC" />
+    <path
+        android:pathData="M54,31 A15,15 0 1,0 54,61 A15,15 0 1,0 54,31 Z"
+        android:fillColor="#30FFF2D4" />
+
+    <!-- Ondulation subtile des dunes sahéliennes à la base -->
+    <path
+        android:pathData="M0,82 Q54,86 108,82 L108,108 L0,108 Z"
+        android:fillColor="#1F58341D" />
+</vector>
