@@ -136,4 +136,48 @@ class WaliRulesAndNavigationTest {
         composeTestRule.onNodeWithTag("btn_settings_back").performClick()
         assertTrue("Le bouton retour doit déclencher onNavigateBack", backClicked)
     }
+
+    @Test
+    fun `board view displays 1 to 30 cell numbers, includes number in contentDescription, and respects showCellNumbers toggle`() {
+        val posF2 = com.example.wali.model.Position.fromAlgebraic("F2") // case n° 12
+        val board = com.example.wali.model.Position.allPositions.associateWith { pos ->
+            if (pos == posF2) Player.STICKS else null
+        }
+        val showNumbersState = androidx.compose.runtime.mutableStateOf(true)
+        var clickedPosition: com.example.wali.model.Position? = null
+
+        composeTestRule.setContent {
+            com.example.wali.ui.components.WaliBoardView(
+                board = board,
+                selectedPosition = null,
+                highlightedMoves = emptySet(),
+                capturablePositions = emptySet(),
+                onCellClicked = { clickedPosition = it },
+                showCellNumbers = showNumbersState.value
+            )
+        }
+
+        // Les numéros 1 (A1), 12 (F2 occupée) et 30 (F5) sont affichés
+        composeTestRule.onNodeWithTag("cell_number_A1", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("cell_number_F2", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("cell_number_F5", useUnmergedTree = true).assertExists()
+
+        // Le contentDescription inclut le numéro de case pour TalkBack
+        composeTestRule.onNode(
+            androidx.compose.ui.test.hasContentDescription("Case 1 (A1) vide")
+        ).assertExists()
+        composeTestRule.onNode(
+            androidx.compose.ui.test.hasContentDescription("Bâtonnet en case 12 (F2)")
+        ).assertExists()
+
+        // Le clic sur la case F2 fonctionne normalement sans être bloqué par le numéro
+        composeTestRule.onNodeWithTag("cell_F2").performClick()
+        assertEquals(posF2, clickedPosition)
+
+        // Masquage des numéros via le réglage
+        showNumbersState.value = false
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("cell_number_A1", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("cell_number_F2", useUnmergedTree = true).assertDoesNotExist()
+    }
 }

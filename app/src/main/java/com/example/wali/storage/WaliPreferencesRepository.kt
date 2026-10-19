@@ -26,7 +26,8 @@ data class WaliUserPreferences(
     val isTimerEnabled: Boolean = true,
     val timerDurationSeconds: Int = 30,
     val isMandatoryAlignmentEnabled: Boolean = false,
-    val isDefeatAtTwoPiecesEnabled: Boolean = false
+    val isDefeatAtTwoPiecesEnabled: Boolean = false,
+    val isCellNumbersEnabled: Boolean = true
 )
 
 /**
@@ -43,6 +44,7 @@ interface WaliPreferencesRepository {
     suspend fun updateTimerDuration(durationSeconds: Int)
     suspend fun updateMandatoryAlignment(enabled: Boolean) {}
     suspend fun updateDefeatAtTwoPieces(enabled: Boolean) {}
+    suspend fun updateCellNumbersEnabled(enabled: Boolean) {}
 }
 
 /**
@@ -61,6 +63,7 @@ class DataStoreWaliPreferencesRepository(
         val KEY_TIMER_DURATION = androidx.datastore.preferences.core.intPreferencesKey("pref_timer_duration")
         val KEY_MANDATORY_ALIGNMENT = booleanPreferencesKey("pref_mandatory_alignment")
         val KEY_DEFEAT_AT_TWO_PIECES = booleanPreferencesKey("pref_defeat_at_two_pieces")
+        val KEY_CELL_NUMBERS_ENABLED = booleanPreferencesKey("pref_cell_numbers_enabled")
     }
 
     override val preferencesFlow: Flow<WaliUserPreferences> = context.waliDataStore.data
@@ -81,7 +84,8 @@ class DataStoreWaliPreferencesRepository(
                 isTimerEnabled = prefs[KEY_TIMER_ENABLED] ?: true,
                 timerDurationSeconds = prefs[KEY_TIMER_DURATION] ?: 30,
                 isMandatoryAlignmentEnabled = prefs[KEY_MANDATORY_ALIGNMENT] ?: false,
-                isDefeatAtTwoPiecesEnabled = prefs[KEY_DEFEAT_AT_TWO_PIECES] ?: false
+                isDefeatAtTwoPiecesEnabled = prefs[KEY_DEFEAT_AT_TWO_PIECES] ?: false,
+                isCellNumbersEnabled = prefs[KEY_CELL_NUMBERS_ENABLED] ?: true
             )
         }
         .distinctUntilChanged()
@@ -106,7 +110,8 @@ class DataStoreWaliPreferencesRepository(
                 isTimerEnabled = prefs[KEY_TIMER_ENABLED] ?: true,
                 timerDurationSeconds = prefs[KEY_TIMER_DURATION] ?: 30,
                 isMandatoryAlignmentEnabled = prefs[KEY_MANDATORY_ALIGNMENT] ?: false,
-                isDefeatAtTwoPiecesEnabled = prefs[KEY_DEFEAT_AT_TWO_PIECES] ?: false
+                isDefeatAtTwoPiecesEnabled = prefs[KEY_DEFEAT_AT_TWO_PIECES] ?: false,
+                isCellNumbersEnabled = prefs[KEY_CELL_NUMBERS_ENABLED] ?: true
             )
         } catch (e: Exception) {
             Log.w("DataStoreWaliPrefs", "Fallback to default preferences: ${e.message}")
@@ -193,6 +198,16 @@ class DataStoreWaliPreferencesRepository(
             Log.w("DataStoreWaliPrefs", "updateDefeatAtTwoPieces failed safely ignored: ${e.message}")
         }
     }
+
+    override suspend fun updateCellNumbersEnabled(enabled: Boolean) {
+        try {
+            context.waliDataStore.edit { prefs ->
+                prefs[KEY_CELL_NUMBERS_ENABLED] = enabled
+            }
+        } catch (e: Exception) {
+            Log.w("DataStoreWaliPrefs", "updateCellNumbersEnabled failed safely ignored: ${e.message}")
+        }
+    }
 }
 
 /**
@@ -245,6 +260,11 @@ class InMemoryWaliPreferencesRepository(
 
     override suspend fun updateDefeatAtTwoPieces(enabled: Boolean) {
         current = current.copy(isDefeatAtTwoPiecesEnabled = enabled)
+        flow.value = current
+    }
+
+    override suspend fun updateCellNumbersEnabled(enabled: Boolean) {
+        current = current.copy(isCellNumbersEnabled = enabled)
         flow.value = current
     }
 }

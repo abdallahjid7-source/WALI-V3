@@ -71,4 +71,15 @@ interface WaliOnlineRepository {
      * Quitte ou annule une partie (ex: le créateur quitte pendant l'attente).
      */
     suspend fun leaveGame(code: String): Result<Unit>
+
+    /**
+     * Demande ou accepte une revanche dans le même salon [code].
+     * Si les deux participants ont demandé la revanche, réinitialise la partie dans la même transaction.
+     */
+    suspend fun requestRematch(code: String): Result<Unit> = Result.success(Unit)
+
+    /**
+     * Annule sa propre demande de revanche en attente dans le salon [code].
+     */
+    suspend fun cancelRematchRequest(code: String): Result<Unit> = Result.success(Unit)
 }

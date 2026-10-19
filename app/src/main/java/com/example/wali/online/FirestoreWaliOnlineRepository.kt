@@ -39,6 +39,10 @@ class FirestoreWaliOnlineRepository(
         const val FIELD_ABANDONED_BY = "abandonedBy"
         const val FIELD_MANDATORY_ALIGNMENT = "mandatoryAlignment"
         const val FIELD_DEFEAT_AT_TWO_PIECES = "defeatAtTwoPieces"
+        const val FIELD_REMATCH_REQUESTED_BY = "rematchRequestedBy"
+        const val FIELD_GAMES_PLAYED = "gamesPlayed"
+        const val FIELD_STATS_BY_UID = "statsByUid"
+        const val FIELD_LAST_SCORED_GAME_INDEX = "lastScoredGameIndex"
 
         @Volatile
         private var fallbackAnonymousUid: String? = null
@@ -81,15 +85,18 @@ class FirestoreWaliOnlineRepository(
                 throw IllegalStateException("Authentification Firebase requise.")
             }
 
+            runCatching { firestore.enableNetwork().await() }
+
             val docRef = firestore.collection(COLLECTION_GAMES).document(code)
-            val existing = docRef.get().await()
-            if (existing.exists()) {
+            val existing = runCatching { docRef.get().await() }.getOrNull()
+            if (existing != null && existing.exists()) {
                 throw IllegalStateException("Un salon avec ce code existe déjà.")
             }
 
             val now = System.currentTimeMillis()
             val stateJson = WaliGameSerializer.serializeGameState(initialGameState)
             val playersMap = mapOf(uid to creatorSide.name)
+            val initialStats = mapOf(uid to 0)
 
             val data = hashMapOf<String, Any?>(
                 FIELD_CODE to code,
@@ -106,7 +113,11 @@ class FirestoreWaliOnlineRepository(
                 FIELD_WINNER to null,
                 FIELD_ABANDONED_BY to null,
                 FIELD_MANDATORY_ALIGNMENT to initialGameState.ruleOptions.mandatoryAlignment,
-                FIELD_DEFEAT_AT_TWO_PIECES to initialGameState.ruleOptions.defeatAtTwoPieces
+                FIELD_DEFEAT_AT_TWO_PIECES to initialGameState.ruleOptions.defeatAtTwoPieces,
+                FIELD_REMATCH_REQUESTED_BY to emptyList<String>(),
+                FIELD_GAMES_PLAYED to 1,
+                FIELD_STATS_BY_UID to initialStats,
+                FIELD_LAST_SCORED_GAME_INDEX to 0
             )
 
             docRef.set(data).await()
@@ -124,7 +135,11 @@ class FirestoreWaliOnlineRepository(
                 lastMoveAt = now,
                 createdAt = now,
                 winner = null,
-                abandonedBy = null
+                abandonedBy = null,
+                rematchRequestedBy = emptyList(),
+                gamesPlayed = 1,
+                statsByUid = initialStats,
+                lastScoredGameIndex = 0
             )
         }
     }
@@ -165,6 +180,11 @@ class FirestoreWaliOnlineRepository(
                     creatorUid to creatorPlayer.name,
                     uid to opponentPlayer.name
                 )
+                val existingStats = parseStatsMap(snapshot.get(FIELD_STATS_BY_UID))
+                val updatedStats = existingStats.toMutableMap().apply {
+                    putIfAbsent(creatorUid, 0)
+                    putIfAbsent(uid, 0)
+                }
 
                 transaction.update(
                     docRef,
@@ -173,6 +193,7 @@ class FirestoreWaliOnlineRepository(
                         FIELD_OPPONENT_UID to uid,
                         FIELD_OPPONENT_PLAYER to opponentPlayer.name,
                         FIELD_PLAYERS to updatedPlayers,
+                        FIELD_STATS_BY_UID to updatedStats,
                         FIELD_LAST_MOVE_AT to now
                     )
                 )
@@ -249,18 +270,43 @@ class FirestoreWaliOnlineRepository(
             val docRef = firestore.collection(COLLECTION_GAMES).document(code)
             val now = System.currentTimeMillis()
             val stateJson = WaliGameSerializer.serializeGameState(newGameState)
+            val isGameEnding = newGameState.winner != null || newGameState.phase == com.example.wali.model.Phase.GAME_OVER
 
-            val updates = mutableMapOf<String, Any?>(
-                FIELD_GAME_STATE_JSON to stateJson,
-                FIELD_LAST_MOVE_AT to now
-            )
+            if (!isGameEnding) {
+                val updates = mapOf<String, Any?>(
+                    FIELD_GAME_STATE_JSON to stateJson,
+                    FIELD_LAST_MOVE_AT to now
+                )
+                docRef.update(updates).await()
+            } else {
+                // Fin de manche : transaction atomique et idempotente pour comptabiliser la victoire dès la fin de partie.
+                // Règle de course : le premier écrit gagne. Si status != ONGOING, on abandonne sans réécrire ni lever d'erreur.
+                firestore.runTransaction { transaction ->
+                    val snapshot = transaction.get(docRef)
+                    if (!snapshot.exists()) return@runTransaction null
+                    val session = parseSession(snapshot) ?: return@runTransaction null
 
-            if (newGameState.winner != null) {
-                updates[FIELD_STATUS] = OnlineGameStatus.FINISHED.value
-                updates[FIELD_WINNER] = newGameState.winner.name
+                    if (session.status != OnlineGameStatus.ONGOING) {
+                        return@runTransaction null
+                    }
+
+                    val (updatedStats, newLastScoredIndex) = computeScoredSalonState(
+                        session = session,
+                        winnerRole = newGameState.winner
+                    )
+
+                    val updates = mutableMapOf<String, Any?>(
+                        FIELD_GAME_STATE_JSON to stateJson,
+                        FIELD_LAST_MOVE_AT to now,
+                        FIELD_STATUS to OnlineGameStatus.FINISHED.value,
+                        FIELD_WINNER to newGameState.winner?.name,
+                        FIELD_STATS_BY_UID to updatedStats,
+                        FIELD_LAST_SCORED_GAME_INDEX to newLastScoredIndex
+                    )
+                    transaction.update(docRef, updates)
+                    null
+                }.await()
             }
-
-            docRef.update(updates).await()
             Unit
         }
     }
@@ -272,16 +318,38 @@ class FirestoreWaliOnlineRepository(
         return runCatching {
             val docRef = firestore.collection(COLLECTION_GAMES).document(code)
             val now = System.currentTimeMillis()
-            val myUid = currentUserId
 
-            val updates = mapOf(
-                FIELD_STATUS to OnlineGameStatus.ABANDONED.value,
-                FIELD_WINNER to winnerPlayer.name,
-                FIELD_ABANDONED_BY to myUid,
-                FIELD_LAST_MOVE_AT to now
-            )
+            // Fin de manche par forfait ou inactivité : transaction atomique et idempotente.
+            // Règle de course : le premier écrit gagne. Si status != ONGOING, on ne réécrit ni winner, ni abandonedBy, ni statsByUid.
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                if (!snapshot.exists()) return@runTransaction null
+                val session = parseSession(snapshot) ?: return@runTransaction null
 
-            docRef.update(updates).await()
+                if (session.status != OnlineGameStatus.ONGOING) {
+                    return@runTransaction null
+                }
+
+                // Point 1 : abandonedBy désigne toujours le joueur qui a abandonné (camp perdant = winnerPlayer.opponent)
+                val abandonedByUid = session.resolveParticipantUidForRole(winnerPlayer.opponent)
+                    ?: currentUserId
+
+                val (updatedStats, newLastScoredIndex) = computeScoredSalonState(
+                    session = session,
+                    winnerRole = winnerPlayer
+                )
+
+                val updates = mapOf<String, Any?>(
+                    FIELD_STATUS to OnlineGameStatus.ABANDONED.value,
+                    FIELD_WINNER to winnerPlayer.name,
+                    FIELD_ABANDONED_BY to abandonedByUid,
+                    FIELD_STATS_BY_UID to updatedStats,
+                    FIELD_LAST_SCORED_GAME_INDEX to newLastScoredIndex,
+                    FIELD_LAST_MOVE_AT to now
+                )
+                transaction.update(docRef, updates)
+                null
+            }.await()
             Unit
         }
     }
@@ -329,9 +397,172 @@ class FirestoreWaliOnlineRepository(
             if (status == OnlineGameStatus.WAITING.value) {
                 // Si la partie était en attente, la supprimer pour nettoyer le lobby
                 docRef.delete().await()
+            } else if (status == OnlineGameStatus.FINISHED.value || status == OnlineGameStatus.ABANDONED.value) {
+                // Signale à l'autre joueur en attente de revanche que ce joueur a quitté le salon
+                val myUid = currentUserId
+                docRef.update(
+                    mapOf(
+                        FIELD_ABANDONED_BY to "LEFT:$myUid",
+                        FIELD_REMATCH_REQUESTED_BY to emptyList<String>(),
+                        FIELD_LAST_MOVE_AT to System.currentTimeMillis()
+                    )
+                ).await()
             }
             Unit
         }
+    }
+
+    override suspend fun requestRematch(code: String): Result<Unit> {
+        return runCatching {
+            val uid = ensureAuthenticated()
+            if (uid.isBlank()) {
+                throw IllegalStateException("Authentification Firebase requise.")
+            }
+
+            val docRef = firestore.collection(COLLECTION_GAMES).document(code)
+
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                if (!snapshot.exists()) {
+                    throw IllegalStateException("L'adversaire a quitté le salon")
+                }
+
+                val session = parseSession(snapshot)
+                    ?: throw IllegalStateException("Format de salon invalide.")
+
+                val creatorUid = session.creatorUid
+                val opponentUid = session.opponentUid
+                if (opponentUid.isNullOrBlank() || session.abandonedBy?.startsWith("LEFT:") == true) {
+                    throw IllegalStateException("L'adversaire a quitté le salon")
+                }
+                if (uid != creatorUid && uid != opponentUid) {
+                    throw IllegalStateException("Vous ne participez pas à ce salon.")
+                }
+
+                // Si la revanche a déjà été réinitialisée par une acceptation quasi simultanée, ne rien refaire
+                if (session.status == OnlineGameStatus.ONGOING) {
+                    return@runTransaction null
+                }
+
+                val updatedRequests = (session.rematchRequestedBy + uid).distinct()
+                val bothAccepted = updatedRequests.contains(creatorUid) && updatedRequests.contains(opponentUid)
+                val now = System.currentTimeMillis()
+
+                if (!bothAccepted) {
+                    transaction.update(
+                        docRef,
+                        mapOf(
+                            FIELD_REMATCH_REQUESTED_BY to updatedRequests,
+                            FIELD_LAST_MOVE_AT to now
+                        )
+                    )
+                } else {
+                    // Les deux joueurs ont accepté : réinitialisation atomique dans la MÊME transaction.
+                    // Résolution du camp vainqueur depuis le champ winner déjà stocké dans le document :
+                    val storedWinnerRole: Player? = session.winner ?: session.gameState.winner
+
+                    // Filet de sécurité de compatibilité ascendante uniquement :
+                    // En fonctionnement normal (Partie D), la manche a déjà été comptabilisée à sa fin
+                    // (lastScoredGameIndex == gamesPlayed) et computeScoredSalonState est alors un no-op.
+                    // Ce rattrapage ne s'exécute que si un document antérieur est arrivé en état FINISHED/ABANDONED
+                    // avec lastScoredGameIndex < gamesPlayed.
+                    val (updatedStats, scoredIndex) = computeScoredSalonState(
+                        session = session,
+                        winnerRole = storedWinnerRole
+                    )
+
+                    val winnerUid: String = (storedWinnerRole?.let { session.resolveParticipantUidForRole(it) })
+                        ?: session.abandonedBy?.takeIf { !it.startsWith("LEFT:") }?.let { abUid ->
+                            if (abUid == creatorUid) opponentUid else creatorUid
+                        }
+                        ?: creatorUid
+
+                    // Le vainqueur de la partie précédente reçoit STICKS (commence toujours), le perdant reçoit STONES
+                    val newCreatorPlayer = if (winnerUid == creatorUid) Player.STICKS else Player.STONES
+                    val newOpponentPlayer = newCreatorPlayer.opponent
+                    val newPlayersMap = mapOf(
+                        creatorUid to newCreatorPlayer.name,
+                        opponentUid to newOpponentPlayer.name
+                    )
+
+                    val newGamesPlayed = session.gamesPlayed + 1
+
+                    // Réinitialisation complète avec les variantes d'origine du salon
+                    val preservedRuleOptions = session.gameState.ruleOptions
+                    val newGameState = com.example.wali.engine.WaliEngine.initializeGame(ruleOptions = preservedRuleOptions)
+                    val newStateJson = WaliGameSerializer.serializeGameState(newGameState)
+
+                    transaction.update(
+                        docRef,
+                        mapOf(
+                            FIELD_STATUS to OnlineGameStatus.ONGOING.value,
+                            FIELD_CREATOR_PLAYER to newCreatorPlayer.name,
+                            FIELD_OPPONENT_PLAYER to newOpponentPlayer.name,
+                            FIELD_PLAYERS to newPlayersMap,
+                            FIELD_GAME_STATE_JSON to newStateJson,
+                            FIELD_WINNER to null,
+                            FIELD_ABANDONED_BY to null,
+                            FIELD_REMATCH_REQUESTED_BY to emptyList<String>(),
+                            FIELD_GAMES_PLAYED to newGamesPlayed,
+                            FIELD_STATS_BY_UID to updatedStats,
+                            FIELD_LAST_SCORED_GAME_INDEX to scoredIndex,
+                            FIELD_LAST_MOVE_AT to now
+                        )
+                    )
+                }
+                null
+            }.await()
+            Unit
+        }
+    }
+
+    override suspend fun cancelRematchRequest(code: String): Result<Unit> {
+        return runCatching {
+            val uid = ensureAuthenticated()
+            if (uid.isBlank()) return Result.success(Unit)
+
+            val docRef = firestore.collection(COLLECTION_GAMES).document(code)
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                if (!snapshot.exists()) return@runTransaction null
+                val currentList = parseStringList(snapshot.get(FIELD_REMATCH_REQUESTED_BY))
+                val updatedList = currentList.filter { it != uid }
+                transaction.update(
+                    docRef,
+                    mapOf(
+                        FIELD_REMATCH_REQUESTED_BY to updatedList,
+                        FIELD_LAST_MOVE_AT to System.currentTimeMillis()
+                    )
+                )
+                null
+            }.await()
+            Unit
+        }
+    }
+
+    private fun parseStringList(raw: Any?): List<String> {
+        if (raw is List<*>) {
+            return raw.mapNotNull { it?.toString()?.takeIf { s -> s.isNotBlank() } }
+        }
+        return emptyList()
+    }
+
+    private fun parseStatsMap(raw: Any?): Map<String, Int> {
+        val result = mutableMapOf<String, Int>()
+        if (raw is Map<*, *>) {
+            raw.forEach { (k, v) ->
+                val key = k?.toString()
+                val value = when (v) {
+                    is Number -> v.toInt()
+                    is String -> v.toIntOrNull()
+                    else -> null
+                }
+                if (!key.isNullOrBlank() && value != null) {
+                    result[key] = value
+                }
+            }
+        }
+        return result
     }
 
     private fun parseSession(doc: DocumentSnapshot): OnlineGameSession? {
@@ -363,6 +594,10 @@ class FirestoreWaliOnlineRepository(
         val winnerStr = doc.getString(FIELD_WINNER)
         val winner = winnerStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
         val abandonedBy = doc.getString(FIELD_ABANDONED_BY)
+        val rematchRequestedBy = parseStringList(doc.get(FIELD_REMATCH_REQUESTED_BY))
+        val gamesPlayed = (doc.getLong(FIELD_GAMES_PLAYED) ?: 1L).toInt().coerceAtLeast(1)
+        val statsByUid = parseStatsMap(doc.get(FIELD_STATS_BY_UID))
+        val lastScoredGameIndex = (doc.getLong(FIELD_LAST_SCORED_GAME_INDEX) ?: 0L).toInt().coerceAtLeast(0)
 
         return OnlineGameSession(
             code = code,
@@ -377,7 +612,71 @@ class FirestoreWaliOnlineRepository(
             lastMoveAt = lastMoveAt,
             createdAt = createdAt,
             winner = winner,
-            abandonedBy = abandonedBy
+            abandonedBy = abandonedBy,
+            rematchRequestedBy = rematchRequestedBy,
+            gamesPlayed = gamesPlayed,
+            statsByUid = statsByUid,
+            lastScoredGameIndex = lastScoredGameIndex
         )
+    }
+
+    /**
+     * Calcule de manière strictement idempotente le score du salon ([statsByUid]) et le marqueur
+     * [lastScoredGameIndex] à la fin d'une manche.
+     *
+     * Invariant du marqueur :
+     * - lastScoredGameIndex == gamesPlayed  ->  la manche en cours a déjà été comptabilisée
+     * - lastScoredGameIndex <  gamesPlayed  ->  la manche en cours n'a pas encore été comptabilisée
+     *
+     * Garde salon incomplet (Point 4) :
+     * Si [OnlineGameSession.opponentUid] est nul ou vide, aucune écriture dans statsByUid n'est
+     * effectuée et le marqueur [lastScoredGameIndex] n'avance pas.
+     *
+     * Exclusivité des participants (D.3) :
+     * Seuls [OnlineGameSession.creatorUid] et [OnlineGameSession.opponentUid] peuvent figurer dans [statsByUid].
+     *
+     * Manche sans vainqueur (Point 3) :
+     * Si [winnerRole] est null alors que le salon est complet, la manche est marquée comme résolue
+     * (lastScoredGameIndex = gamesPlayed) sans incrémenter le score d'aucun joueur.
+     */
+    private fun computeScoredSalonState(
+        session: OnlineGameSession,
+        winnerRole: Player?
+    ): Pair<Map<String, Int>, Int> {
+        val creatorUid = session.creatorUid.takeIf { it.isNotBlank() }
+        val opponentUid = session.opponentUid?.takeIf { it.isNotBlank() }
+
+        // Salon incomplet : pas d'écriture dans statsByUid et le marqueur n'avance pas
+        if (creatorUid == null || opponentUid == null) {
+            val safeStats = if (creatorUid != null) {
+                session.statsByUid.filterKeys { it == creatorUid }
+            } else {
+                emptyMap()
+            }
+            return safeStats to session.lastScoredGameIndex
+        }
+
+        val allowedParticipants = setOf(creatorUid, opponentUid)
+        val sanitizedStats = session.statsByUid
+            .filterKeys { it in allowedParticipants }
+            .toMutableMap()
+            .apply {
+                putIfAbsent(creatorUid, 0)
+                putIfAbsent(opponentUid, 0)
+            }
+
+        // Déjà comptabilisé pour cette manche -> idempotent (no-op)
+        if (session.lastScoredGameIndex >= session.gamesPlayed) {
+            return sanitizedStats to session.lastScoredGameIndex
+        }
+
+        if (winnerRole != null) {
+            val winnerUid = session.resolveParticipantUidForRole(winnerRole)
+            if (winnerUid != null && winnerUid in allowedParticipants) {
+                sanitizedStats[winnerUid] = (sanitizedStats[winnerUid] ?: 0) + 1
+            }
+        }
+
+        return sanitizedStats to session.gamesPlayed
     }
 }

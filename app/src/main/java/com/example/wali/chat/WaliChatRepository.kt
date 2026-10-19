@@ -28,4 +28,20 @@ interface WaliChatRepository {
      * Nettoie les messages de la salle fermée (si autorisée côté client).
      */
     suspend fun clearMessages(gameCode: String): Result<Unit>
+
+    /**
+     * Publie un message système dans la partie [gameCode] (ex: "--- Nouvelle partie ---").
+     */
+    suspend fun postSystemMessage(gameCode: String, text: String): Result<Unit> {
+        return sendMessage(
+            gameCode,
+            WaliChatMessage(
+                senderRole = null,
+                senderUid = "system",
+                text = text,
+                timestamp = System.currentTimeMillis(),
+                type = ChatMessageType.SYSTEM
+            )
+        )
+    }
 }

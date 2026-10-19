@@ -12,6 +12,8 @@ object WaliFirebaseProvider {
 
     @Suppress("UNUSED_PARAMETER")
     fun getFirestore(context: Context? = null): FirebaseFirestore {
-        return FirebaseFirestore.getInstance()
+        return FirebaseFirestore.getInstance().also { db ->
+            runCatching { db.enableNetwork() }
+        }
     }
 }

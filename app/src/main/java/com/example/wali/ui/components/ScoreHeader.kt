@@ -59,6 +59,9 @@ fun ScoreHeader(
     isTimerPaused: Boolean = false,
     localPlayerRole: Player? = null,
     gameDurationSeconds: Long = 0L,
+    salonMyWins: Int = 0,
+    salonOpponentWins: Int = 0,
+    salonGamesPlayed: Int = 1,
     isCompact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -134,6 +137,26 @@ fun ScoreHeader(
                         modifier = Modifier.testTag("game_duration_indicator")
                     )
                 }
+            }
+        }
+
+        if (gameMode == GameMode.ONLINE) {
+            Spacer(modifier = Modifier.height(if (isCompact) 3.dp else 5.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(waliColors.surfaceAlt.copy(alpha = 0.55f))
+                    .border(1.dp, waliColors.accentGold.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 2.dp)
+                    .testTag("online_salon_score_header")
+            ) {
+                Text(
+                    text = "Score du salon : $salonMyWins – $salonOpponentWins • Parties : $salonGamesPlayed",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = waliColors.accentGold
+                    )
+                )
             }
         }
 

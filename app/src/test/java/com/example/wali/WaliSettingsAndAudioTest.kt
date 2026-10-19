@@ -105,6 +105,10 @@ class FakeWaliPreferencesRepository(
     override suspend fun updateDefeatAtTwoPieces(enabled: Boolean) {
         state.value = state.value.copy(isDefeatAtTwoPiecesEnabled = enabled)
     }
+
+    override suspend fun updateCellNumbersEnabled(enabled: Boolean) {
+        state.value = state.value.copy(isCellNumbersEnabled = enabled)
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -307,5 +311,46 @@ class WaliSettingsAndAudioTest {
 
         assertTrue(vm.uiState.value.gameState.ruleOptions.mandatoryAlignment)
         assertTrue(vm.uiState.value.gameState.ruleOptions.defeatAtTwoPieces)
+    }
+
+    @Test
+    fun cellNumberMapping_coversAll30CellsInCanonicalRowMajorOrder() {
+        val allPositions = com.example.wali.model.Position.allPositions
+        assertEquals(30, allPositions.size)
+        assertEquals(30, com.example.wali.ui.components.CELL_NUMBER_BY_POSITION.size)
+
+        // Vérification exhaustive 1..30 dans l'ordre ligne par ligne (A1..F1, A2..F2, ..., A5..F5)
+        val numbers = allPositions.map { com.example.wali.ui.components.cellNumberForPosition(it) }
+        assertEquals((1..30).toList(), numbers)
+
+        // Vérifications ponctuelles clés (dont la case n° 12 = F2)
+        assertEquals(1, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("A1")))
+        assertEquals(6, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("F1")))
+        assertEquals(7, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("A2")))
+        assertEquals(12, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("F2")))
+        assertEquals(25, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("A5")))
+        assertEquals(30, com.example.wali.ui.components.cellNumberForPosition(com.example.wali.model.Position.fromAlgebraic("F5")))
+    }
+
+    @Test
+    fun cellNumbersPreference_isEnabledByDefault_andPersistedViaViewModel() = runTest {
+        val vm = WaliViewModel(storage = storage, preferencesRepository = prefs, audio = audio)
+        testScheduler.advanceUntilIdle()
+
+        // Activé par défaut
+        assertTrue(vm.uiState.value.isCellNumbersEnabled)
+        assertTrue(prefs.getPreferences().isCellNumbersEnabled)
+
+        // Désactivation dans les réglages
+        vm.onCellNumbersEnabledChanged(false)
+        testScheduler.advanceUntilIdle()
+        assertFalse(vm.uiState.value.isCellNumbersEnabled)
+        assertFalse(prefs.getPreferences().isCellNumbersEnabled)
+
+        // Réactivation
+        vm.onCellNumbersEnabledChanged(true)
+        testScheduler.advanceUntilIdle()
+        assertTrue(vm.uiState.value.isCellNumbersEnabled)
+        assertTrue(prefs.getPreferences().isCellNumbersEnabled)
     }
 }

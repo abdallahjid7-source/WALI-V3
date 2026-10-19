@@ -51,7 +51,16 @@ data class OnlineGameSession(
     val lastMoveAt: Long = System.currentTimeMillis(),
     val createdAt: Long = System.currentTimeMillis(),
     val winner: Player? = null,
-    val abandonedBy: String? = null
+    val abandonedBy: String? = null,
+    val rematchRequestedBy: List<String> = emptyList(),
+    val gamesPlayed: Int = 1,
+    val statsByUid: Map<String, Int> = emptyMap(),
+    /**
+     * Marqueur explicite d'idempotence du comptage des victoires du salon :
+     * - lastScoredGameIndex == gamesPlayed  ->  la manche en cours a déjà été comptabilisée
+     * - lastScoredGameIndex <  gamesPlayed  ->  la manche en cours n'a pas encore été comptabilisée
+     */
+    val lastScoredGameIndex: Int = 0
 ) {
     /**
      * Retourne le camp (Player) attribué à un UID donné dans cette session.
@@ -59,6 +68,41 @@ data class OnlineGameSession(
     fun getPlayerRole(uid: String): Player? {
         val roleStr = players[uid] ?: if (uid == creatorUid) creatorPlayer.name else if (uid == opponentUid) opponentPlayer?.name else null
         return roleStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
+    }
+
+    /**
+     * Résout l'UID du participant (uniquement parmi creatorUid et opponentUid) qui joue le camp [role].
+     * Retourne null si le salon est incomplet ou si aucun des deux joueurs ne correspond.
+     */
+    fun resolveParticipantUidForRole(role: Player): String? {
+        val oppUid = opponentUid?.takeIf { it.isNotBlank() } ?: return null
+        if (creatorUid.isBlank()) return null
+        val creatorRole = getPlayerRole(creatorUid) ?: creatorPlayer
+        val opponentRole = getPlayerRole(oppUid) ?: opponentPlayer ?: creatorRole.opponent
+        return when (role) {
+            creatorRole -> creatorUid
+            opponentRole -> oppUid
+            else -> null
+        }
+    }
+
+    /**
+     * Retourne l'UID de l'adversaire par rapport à [uid].
+     */
+    fun getOpponentUid(uid: String): String? {
+        return when (uid) {
+            creatorUid -> opponentUid
+            opponentUid -> creatorUid
+            else -> opponentUid
+        }
+    }
+
+    /**
+     * Retourne le nombre de victoires cumulées dans ce salon pour [uid] (indexé par uid).
+     */
+    fun getWinsForUid(uid: String?): Int {
+        if (uid.isNullOrBlank()) return 0
+        return statsByUid[uid] ?: 0
     }
 
     /**

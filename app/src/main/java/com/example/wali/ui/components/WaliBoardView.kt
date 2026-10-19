@@ -54,6 +54,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -65,6 +66,27 @@ import com.example.wali.model.Player
 import com.example.wali.model.Position
 import com.example.wali.ui.theme.LocalWaliColors
 
+/**
+ * Retourne le numéro absolu (1 à 30) associé à une [Position] du plateau 5×6.
+ * Ordre canonique de lecture : ligne par ligne (1 à 5) et colonne par colonne (A à F).
+ * Invariant quel que soit le camp du joueur local ou le statut de spectateur.
+ * Exemple : A1 -> 1, F1 -> 6, A2 -> 7, F2 -> 12, A5 -> 25, F5 -> 30.
+ */
+fun cellNumberForPosition(position: Position): Int =
+    position.row * Position.COLS + position.col + 1
+
+/**
+ * Table de correspondance précalculée (constante) associant chaque [Position] à son numéro (1..30).
+ */
+val CELL_NUMBER_BY_POSITION: Map<Position, Int> =
+    Position.allPositions.associateWith { cellNumberForPosition(it) }
+
+/**
+ * Table précalculée des étiquettes textuelles ("1".."30") pour éviter toute allocation lors des recompositions.
+ */
+private val CELL_NUMBER_LABEL_BY_POSITION: Map<Position, String> =
+    Position.allPositions.associateWith { cellNumberForPosition(it).toString() }
+
 @Composable
 fun WaliBoardView(
     board: Map<Position, Player?>,
@@ -73,7 +95,8 @@ fun WaliBoardView(
     capturablePositions: Set<Position>,
     onCellClicked: (Position) -> Unit,
     modifier: Modifier = Modifier,
-    lastMove: PieceMove? = null
+    lastMove: PieceMove? = null,
+    showCellNumbers: Boolean = true
 ) {
     // Transition infinie pour pulsation douce des pions capturables
     val waliColors = LocalWaliColors.current
@@ -158,6 +181,26 @@ fun WaliBoardView(
         } else {
             boardWidth = minOf(availWidth, 600.dp)
             boardHeight = boardWidth / boardRatio
+        }
+
+        // Styles de texte des numéros (1..30) mémorisés une seule fois hors de la boucle des 30 cases
+        val cellNumberFontSize = if (boardWidth < 280.dp) 8.sp else if (boardWidth < 360.dp) 9.sp else 10.sp
+        val baseLabelStyle = MaterialTheme.typography.labelSmall
+        val emptyCellNumberStyle = remember(baseLabelStyle, cellNumberFontSize, waliColors.textPrimary) {
+            baseLabelStyle.copy(
+                fontSize = cellNumberFontSize,
+                fontWeight = FontWeight.SemiBold,
+                color = waliColors.textPrimary.copy(alpha = 0.50f),
+                lineHeight = cellNumberFontSize
+            )
+        }
+        val occupiedCellNumberStyle = remember(baseLabelStyle, cellNumberFontSize, waliColors.textPrimary) {
+            baseLabelStyle.copy(
+                fontSize = cellNumberFontSize,
+                fontWeight = FontWeight.Medium,
+                color = waliColors.textPrimary.copy(alpha = 0.36f),
+                lineHeight = cellNumberFontSize
+            )
         }
 
         Column(
@@ -250,6 +293,8 @@ fun WaliBoardView(
                             ) {
                                 for (col in 0 until Position.COLS) {
                                     val position = Position(row, col)
+                                    val cellNumber = CELL_NUMBER_BY_POSITION.getValue(position)
+                                    val cellNumberLabel = CELL_NUMBER_LABEL_BY_POSITION.getValue(position)
                                     val piece = board[position]
                                     val isSelected = (position == selectedPosition)
                                     val isHighlightedMove = position in highlightedMoves
@@ -260,6 +305,11 @@ fun WaliBoardView(
 
                                     BoardCell(
                                         position = position,
+                                        cellNumber = cellNumber,
+                                        cellNumberLabel = cellNumberLabel,
+                                        showCellNumber = showCellNumbers,
+                                        emptyCellNumberStyle = emptyCellNumberStyle,
+                                        occupiedCellNumberStyle = occupiedCellNumberStyle,
                                         piece = piece,
                                         isSelected = isSelected,
                                         isHighlightedMove = isHighlightedMove,
@@ -335,6 +385,11 @@ fun WaliBoardView(
 @Composable
 private fun BoardCell(
     position: Position,
+    cellNumber: Int,
+    cellNumberLabel: String,
+    showCellNumber: Boolean,
+    emptyCellNumberStyle: TextStyle,
+    occupiedCellNumberStyle: TextStyle,
     piece: Player?,
     isSelected: Boolean,
     isHighlightedMove: Boolean,
@@ -351,12 +406,12 @@ private fun BoardCell(
     val isEvenCell = (position.row + position.col) % 2 == 0
     val cellBackground = if (isEvenCell) waliColors.cellBackground else waliColors.cellBackgroundAlt
 
-    // Description textuelle pour lecteurs d'écran (TalkBack)
+    // Description textuelle pour lecteurs d'écran (TalkBack) incluant le numéro de case (1..30)
     val accessibilityDescription = buildString {
         when (piece) {
-            Player.STICKS -> append("Bâtonnet en ${position.algebraic}")
-            Player.STONES -> append("Caillou en ${position.algebraic}")
-            null -> append("Case ${position.algebraic} vide")
+            Player.STICKS -> append("Bâtonnet en case $cellNumber (${position.algebraic})")
+            Player.STONES -> append("Caillou en case $cellNumber (${position.algebraic})")
+            null -> append("Case $cellNumber (${position.algebraic}) vide")
         }
         if (isSelected) append(", sélectionné")
         if (isHighlightedMove) append(", déplacement possible")
@@ -389,6 +444,19 @@ private fun BoardCell(
             },
         contentAlignment = Alignment.Center
     ) {
+        // Numéro de case (1 à 30) en arrière-plan dans le coin supérieur gauche,
+        // non cliquable, dégagé du pion central (bâtonnet ou caillou) et atténué si la case est occupée
+        if (showCellNumber) {
+            Text(
+                text = cellNumberLabel,
+                style = if (piece == null) emptyCellNumberStyle else occupiedCellNumberStyle,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 3.dp, top = 1.5.dp)
+                    .testTag("cell_number_${position.algebraic}")
+            )
+        }
+
         // Petit point d'ancrage central discret (style plateau traditionnel gravé)
         Box(
             modifier = Modifier
@@ -484,4 +552,5 @@ private fun BoardCell(
         }
     }
 }
+
 

@@ -19,9 +19,10 @@ service cloud.firestore {
                     && (request.auth == null || request.resource.data.creatorUid == request.auth.uid);
 
       // Mise à jour :
-      // Deux cas autorisés :
+      // Trois cas autorisés :
       // 1. Un second joueur rejoint une partie en attente (status -> 'ongoing', opponentUid défini)
       // 2. Un joueur participant met à jour l'état du jeu ou déclare un abandon/forfait
+      // 3. Revanche dans le même salon depuis un état 'finished' ou 'abandoned' vers 'ongoing' (ou demande/annulation en attente)
       allow update: if (
         // Cas 1 : Rejoindre une partie
         (resource.data.status == 'waiting'
@@ -34,6 +35,15 @@ service cloud.firestore {
         (resource.data.status == 'ongoing'
          && request.resource.data.creatorUid == resource.data.creatorUid
          && request.resource.data.opponentUid == resource.data.opponentUid)
+        ||
+        // Cas 3 : Revanche (demande, annulation ou relance vers 'ongoing') par l'un des deux participants sans changer creatorUid ni opponentUid
+        (resource.data.status in ['finished', 'abandoned']
+         && (request.resource.data.status == 'ongoing' || request.resource.data.status == resource.data.status)
+         && (request.auth == null
+             || request.auth.uid == resource.data.creatorUid
+             || request.auth.uid == resource.data.opponentUid)
+         && resource.data.creatorUid == request.resource.data.creatorUid
+         && resource.data.opponentUid == request.resource.data.opponentUid)
       );
 
       // Suppression :

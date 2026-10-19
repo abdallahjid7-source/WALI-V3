@@ -399,6 +399,9 @@ fun WaliGameScreen(
                             timerDurationSeconds = uiState.timerDurationSeconds,
                             isTimerPaused = uiState.isTimerPaused,
                             gameDurationSeconds = uiState.gameDurationSeconds,
+                            salonMyWins = uiState.salonMyWins,
+                            salonOpponentWins = uiState.salonOpponentWins,
+                            salonGamesPlayed = uiState.salonGamesPlayed,
                             isCompact = true
                         )
 
@@ -443,6 +446,7 @@ fun WaliGameScreen(
                             capturablePositions = uiState.capturablePositions,
                             onCellClicked = { pos -> viewModel.onCellClicked(pos) },
                             lastMove = uiState.lastMove,
+                            showCellNumbers = uiState.isCellNumbersEnabled,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -518,6 +522,9 @@ fun WaliGameScreen(
                                 timerDurationSeconds = uiState.timerDurationSeconds,
                                 isTimerPaused = uiState.isTimerPaused,
                                 gameDurationSeconds = uiState.gameDurationSeconds,
+                                salonMyWins = uiState.salonMyWins,
+                                salonOpponentWins = uiState.salonOpponentWins,
+                                salonGamesPlayed = uiState.salonGamesPlayed,
                                 isCompact = totalHeight < 680.dp
                             )
                         }
@@ -538,6 +545,7 @@ fun WaliGameScreen(
                                 capturablePositions = uiState.capturablePositions,
                                 onCellClicked = { pos -> viewModel.onCellClicked(pos) },
                                 lastMove = uiState.lastMove,
+                                showCellNumbers = uiState.isCellNumbersEnabled,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -631,6 +639,9 @@ fun WaliGameScreen(
                                 timerDurationSeconds = uiState.timerDurationSeconds,
                                 isTimerPaused = uiState.isTimerPaused,
                                 gameDurationSeconds = uiState.gameDurationSeconds,
+                                salonMyWins = uiState.salonMyWins,
+                                salonOpponentWins = uiState.salonOpponentWins,
+                                salonGamesPlayed = uiState.salonGamesPlayed,
                                 isCompact = true
                             )
 
@@ -643,6 +654,7 @@ fun WaliGameScreen(
                                 capturablePositions = uiState.capturablePositions,
                                 onCellClicked = { pos -> viewModel.onCellClicked(pos) },
                                 lastMove = uiState.lastMove,
+                                showCellNumbers = uiState.isCellNumbersEnabled,
                                 modifier = Modifier.fillMaxWidth()
                             )
 
@@ -689,6 +701,16 @@ fun WaliGameScreen(
                 gameDurationSeconds = uiState.gameDurationSeconds,
                 scoreboardStats = uiState.scoreboardStats,
                 gameOverReason = uiState.gameOverReason,
+                salonMyWins = uiState.salonMyWins,
+                salonOpponentWins = uiState.salonOpponentWins,
+                salonGamesPlayed = uiState.salonGamesPlayed,
+                isWaitingForRematch = uiState.isWaitingForRematch,
+                isRematchRequestedByOpponent = uiState.isRematchRequestedByOpponent,
+                rematchTimeoutRemainingSeconds = uiState.rematchTimeoutRemainingSeconds,
+                rematchStatusMessage = uiState.rematchStatusMessage,
+                onRequestRematch = { viewModel.requestOnlineRematch() },
+                onCancelRematch = { viewModel.cancelOnlineRematchRequest() },
+                onLeaveOnlineSalon = { viewModel.leaveOnlineSalonAfterGame() },
                 onOpenScoreboard = onOpenScoreboard,
                 onNewGameClicked = {
                     val activity = context as? Activity

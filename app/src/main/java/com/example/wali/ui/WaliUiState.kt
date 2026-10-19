@@ -56,6 +56,7 @@ data class WaliUiState(
     val timerRemainingSeconds: Int = 30,
     val isMandatoryAlignmentEnabled: Boolean = false,
     val isDefeatAtTwoPiecesEnabled: Boolean = false,
+    val isCellNumbersEnabled: Boolean = true,
     val isAppInBackground: Boolean = false,
     val isSecondaryScreenOpen: Boolean = false,
     val isAdShowing: Boolean = false,
@@ -77,6 +78,8 @@ data class WaliUiState(
     val showScoreboardDialog: Boolean = false,
     val showForfeitConfirmation: Boolean = false,
     val gameOverReason: String? = null,
+    val rematchTimeoutRemainingSeconds: Int? = null,
+    val rematchStatusMessage: String? = null,
     val chatState: WaliChatUiState = WaliChatUiState()
 ) {
     /**
@@ -84,6 +87,60 @@ data class WaliUiState(
      */
     val isOnlineGame: Boolean
         get() = gameMode == GameMode.ONLINE
+
+    /**
+     * Vrai si le joueur local a demandé une revanche dans le salon actuel.
+     */
+    val isRematchRequestedByMe: Boolean
+        get() {
+            val session = onlineGameSession ?: return false
+            val uid = localPlayerUid ?: return false
+            return session.rematchRequestedBy.contains(uid)
+        }
+
+    /**
+     * Vrai si l'adversaire a demandé une revanche dans le salon actuel.
+     */
+    val isRematchRequestedByOpponent: Boolean
+        get() {
+            val session = onlineGameSession ?: return false
+            val myUid = localPlayerUid ?: return false
+            val oppUid = session.getOpponentUid(myUid) ?: return false
+            return session.rematchRequestedBy.contains(oppUid)
+        }
+
+    /**
+     * Vrai si seul le joueur local a demandé la revanche et attend la réponse de l'adversaire.
+     */
+    val isWaitingForRematch: Boolean
+        get() = isOnlineGame && isRematchRequestedByMe && !isRematchRequestedByOpponent
+
+    /**
+     * Nombre de victoires du joueur local dans le salon courant (indexé par uid).
+     */
+    val salonMyWins: Int
+        get() {
+            val session = onlineGameSession ?: return 0
+            val myUid = localPlayerUid ?: session.creatorUid
+            return session.getWinsForUid(myUid)
+        }
+
+    /**
+     * Nombre de victoires de l'adversaire dans le salon courant (indexé par uid).
+     */
+    val salonOpponentWins: Int
+        get() {
+            val session = onlineGameSession ?: return 0
+            val myUid = localPlayerUid ?: session.creatorUid
+            val oppUid = session.getOpponentUid(myUid)
+            return session.getWinsForUid(oppUid)
+        }
+
+    /**
+     * Nombre de parties jouées dans le salon courant.
+     */
+    val salonGamesPlayed: Int
+        get() = onlineGameSession?.gamesPlayed ?: 1
 
     /**
      * Vrai si une partie est active et que le joueur peut déclarer forfait.

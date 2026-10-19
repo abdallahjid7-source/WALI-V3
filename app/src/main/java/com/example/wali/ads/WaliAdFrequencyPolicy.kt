@@ -23,10 +23,12 @@ class WaliAdFrequencyPolicy(
 
     /**
      * Appelé dès qu'une partie arrive à son terme (victoire ou blocage).
+     * Aucune interstitielle ne s'affiche entre la fin d'une partie et le lancement d'une revanche acceptée ([isRematch] = true).
      *
      * @return `true` si le seuil de parties requis est atteint et qu'une interstitielle est éligible, `false` sinon.
      */
-    fun onGameFinished(): Boolean {
+    fun onGameFinished(isRematch: Boolean = false): Boolean {
+        if (isRematch) return false
         completedGamesCount++
         return if (completedGamesCount >= gamesBetweenAds) {
             completedGamesCount = 0

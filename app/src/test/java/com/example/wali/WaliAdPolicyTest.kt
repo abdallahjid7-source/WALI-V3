@@ -93,4 +93,15 @@ class WaliAdPolicyTest {
         assertEquals(0, policy.currentCompletedGamesCount)
         assertFalse(policy.shouldShowAppOpenOnForeground(100000000L))
     }
+
+    @Test
+    fun interstitialFrequency_acceptedRematchNeverTriggersAd() {
+        val policy = WaliAdFrequencyPolicy(gamesBetweenAds = 2)
+        assertFalse(policy.onGameFinished(isRematch = false))
+        assertEquals(1, policy.currentCompletedGamesCount)
+
+        // Même si le compteur est à 1, une revanche acceptée ne déclenche jamais d'interstitielle
+        assertFalse(policy.onGameFinished(isRematch = true))
+        assertEquals(1, policy.currentCompletedGamesCount)
+    }
 }

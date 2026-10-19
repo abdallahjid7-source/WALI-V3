@@ -153,6 +153,7 @@ fun WaliApp(
                     timerDurationSeconds = uiState.timerDurationSeconds,
                     isMandatoryAlignmentEnabled = uiState.isMandatoryAlignmentEnabled,
                     isDefeatAtTwoPiecesEnabled = uiState.isDefeatAtTwoPiecesEnabled,
+                    isCellNumbersEnabled = uiState.isCellNumbersEnabled,
                     onSfxVolumeChanged = { gameViewModel.onSfxVolumeChanged(it) },
                     onMusicVolumeChanged = { gameViewModel.onMusicVolumeChanged(it) },
                     onMutedChanged = { gameViewModel.onMutedChanged(it) },
@@ -161,6 +162,7 @@ fun WaliApp(
                     onTimerDurationChanged = { gameViewModel.onTimerDurationChanged(it) },
                     onMandatoryAlignmentChanged = { gameViewModel.onMandatoryAlignmentChanged(it) },
                     onDefeatAtTwoPiecesChanged = { gameViewModel.onDefeatAtTwoPiecesChanged(it) },
+                    onCellNumbersEnabledChanged = { gameViewModel.onCellNumbersEnabledChanged(it) },
                     onOpenScoreboard = {
                         gameViewModel.playButtonClick()
                         navController.navigate(WaliDestinations.SCOREBOARD)

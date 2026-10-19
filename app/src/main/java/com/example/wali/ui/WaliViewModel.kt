@@ -80,7 +80,14 @@ class WaliViewModel(
     private var onlineSessionJob: Job? = null
     private var onlineInactivityJob: Job? = null
     private var chatMessagesJob: Job? = null
+    private var rematchTimeoutJob: Job? = null
+    private var preRematchMessageIds: Set<String> = emptySet()
     private val chatRateLimiter = WaliChatRateLimiter()
+
+    /**
+     * Délai d'attente maximal en secondes pour l'acceptation d'une revanche en ligne (60s par défaut).
+     */
+    var rematchTimeoutSeconds: Int = 60
 
     /**
      * Délai visuel en millisecondes pour rendre le coup de l'IA naturel et lisible.
@@ -105,7 +112,8 @@ class WaliViewModel(
                                 userPrefs.timerDurationSeconds
                             } else current.timerRemainingSeconds,
                             isMandatoryAlignmentEnabled = userPrefs.isMandatoryAlignmentEnabled,
-                            isDefeatAtTwoPiecesEnabled = userPrefs.isDefeatAtTwoPiecesEnabled
+                            isDefeatAtTwoPiecesEnabled = userPrefs.isDefeatAtTwoPiecesEnabled,
+                            isCellNumbersEnabled = userPrefs.isCellNumbersEnabled
                         )
                     }
                     audio?.setSfxVolume(userPrefs.sfxVolume)
@@ -276,6 +284,17 @@ class WaliViewModel(
         _uiState.update { it.copy(isDefeatAtTwoPiecesEnabled = enabled) }
         viewModelScope.launch {
             preferencesRepository?.updateDefeatAtTwoPieces(enabled)
+        }
+    }
+
+    /**
+     * Active ou désactive l'affichage des numéros de cases (1 à 30) sur le plateau.
+     */
+    fun onCellNumbersEnabledChanged(enabled: Boolean) {
+        audio?.playClick()
+        _uiState.update { it.copy(isCellNumbersEnabled = enabled) }
+        viewModelScope.launch {
+            preferencesRepository?.updateCellNumbersEnabled(enabled)
         }
     }
 
@@ -775,13 +794,17 @@ class WaliViewModel(
      */
     private fun startDurationTracking() {
         durationJob?.cancel()
+        if (_uiState.value.isTimerPaused || _uiState.value.gameState.phase == Phase.GAME_OVER) {
+            return
+        }
         durationJob = viewModelScope.launch {
             while (isActive) {
                 delay(1000L)
                 val current = _uiState.value
-                if (!current.isTimerPaused && current.gameState.phase != Phase.GAME_OVER) {
-                    _uiState.update { it.copy(gameDurationSeconds = it.gameDurationSeconds + 1L) }
+                if (current.isTimerPaused || current.gameState.phase == Phase.GAME_OVER) {
+                    break
                 }
+                _uiState.update { it.copy(gameDurationSeconds = it.gameDurationSeconds + 1L) }
             }
         }
     }
@@ -1363,9 +1386,13 @@ class WaliViewModel(
         timerJob = viewModelScope.launch {
             while (isActive) {
                 delay(1000L)
+                val beforeTick = _uiState.value
+                if (beforeTick.isTimerPaused) {
+                    break
+                }
                 tickTimer()
                 val current = _uiState.value
-                if (!current.isTimerEnabled || current.gameState.phase == Phase.GAME_OVER || current.isAiTurn || current.timerRemainingSeconds <= 0) {
+                if (!current.isTimerEnabled || current.isTimerPaused || current.gameState.phase == Phase.GAME_OVER || current.isAiTurn || current.timerRemainingSeconds <= 0) {
                     break
                 }
             }
@@ -1380,6 +1407,8 @@ class WaliViewModel(
         timerJob = null
         durationJob?.cancel()
         durationJob = null
+        rematchTimeoutJob?.cancel()
+        rematchTimeoutJob = null
     }
 
     /**
@@ -1728,6 +1757,9 @@ class WaliViewModel(
         onlineSessionJob = null
         chatMessagesJob?.cancel()
         chatMessagesJob = null
+        rematchTimeoutJob?.cancel()
+        rematchTimeoutJob = null
+        preRematchMessageIds = emptySet()
         chatRateLimiter.reset()
 
         if (code != null) {
@@ -1757,7 +1789,16 @@ class WaliViewModel(
         onlineSessionJob = viewModelScope.launch {
             onlineRepository?.observeGame(code)?.collect { session ->
                 if (session == null) {
-                    handleOpponentLeftSystemMessage()
+                    val prevSession = _uiState.value.onlineGameSession
+                    val wasEndOfGame = prevSession != null &&
+                            (prevSession.status == OnlineGameStatus.FINISHED ||
+                                    prevSession.status == OnlineGameStatus.ABANDONED ||
+                                    _uiState.value.gameState.phase == Phase.GAME_OVER)
+                    if (wasEndOfGame) {
+                        handleOpponentLeftDuringRematch()
+                    } else {
+                        handleOpponentLeftSystemMessage()
+                    }
                     return@collect
                 }
                 handleOnlineSessionUpdate(session)
@@ -1776,15 +1817,16 @@ class WaliViewModel(
             repo.observeMessages(code).collect { rawMessages ->
                 val isBlocked = _uiState.value.chatState.isOpponentBlocked
                 val myRole = _uiState.value.localPlayerRole
+                val currentSessionMessages = rawMessages.filter { it.id !in preRematchMessageIds }
                 val filteredMessages = if (isBlocked) {
-                    rawMessages.filter { it.senderRole == myRole || it.type == ChatMessageType.SYSTEM }
+                    currentSessionMessages.filter { it.senderRole == myRole || it.type == ChatMessageType.SYSTEM }
                 } else {
-                    rawMessages
+                    currentSessionMessages
                 }
 
                 val wasOpen = _uiState.value.chatState.isOpen
                 val oldMessageIds = _uiState.value.chatState.messages.map { it.id }.toSet()
-                val newIncomingFromOpponent = rawMessages.any {
+                val newIncomingFromOpponent = currentSessionMessages.any {
                     it.id.isNotBlank() && it.id !in oldMessageIds && it.senderRole != myRole && it.type != ChatMessageType.SYSTEM
                 }
 
@@ -2098,9 +2140,13 @@ class WaliViewModel(
             current.localPlayerRole ?: session.creatorPlayer
         }
 
+        val prevStatus = prevSession?.status
+        val prevGamesPlayed = prevSession?.gamesPlayed ?: 1
+
         when (session.status) {
             OnlineGameStatus.WAITING -> {
                 stopOnlineInactivityMonitoring()
+                stopRematchTimeoutCountdown()
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
@@ -2110,7 +2156,75 @@ class WaliViewModel(
                 }
             }
             OnlineGameStatus.ONGOING -> {
+                stopRematchTimeoutCountdown()
                 val wasWaiting = prevSession?.status == OnlineGameStatus.WAITING || current.waitingForOpponentCode != null
+                val isRematchReset = (prevStatus == OnlineGameStatus.FINISHED ||
+                        prevStatus == OnlineGameStatus.ABANDONED ||
+                        prevGameState.phase == Phase.GAME_OVER) &&
+                        (session.gamesPlayed > prevGamesPlayed || session.gameState.phase != Phase.GAME_OVER)
+
+                if (isRematchReset) {
+                    // Revanche acceptée par les deux joueurs : réinitialisation complète dans le même salon
+                    audio?.playClick()
+                    durationJob?.cancel()
+                    preRematchMessageIds = current.chatState.messages.map { it.id }.toSet()
+
+                    val separatorMsg = WaliChatMessage(
+                        id = "sys_rematch_${session.gamesPlayed}",
+                        senderRole = null,
+                        senderUid = "system",
+                        text = "--- Nouvelle partie ---",
+                        timestamp = System.currentTimeMillis(),
+                        type = ChatMessageType.SYSTEM
+                    )
+
+                    _uiState.update { state ->
+                        state.copy(
+                            onlineGameSession = session,
+                            gameState = session.gameState,
+                            waitingForOpponentCode = null,
+                            gameMode = GameMode.ONLINE,
+                            localPlayerRole = myRole,
+                            selectedPosition = null,
+                            highlightedMoves = emptySet(),
+                            capturablePositions = emptySet(),
+                            lastMove = null,
+                            feedbackMessage = if (session.gameState.currentPlayer == myRole) {
+                                val label = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
+                                "Revanche lancée ! C'est votre tour ($label)."
+                            } else {
+                                val oppLabel = if (session.gameState.currentPlayer == Player.STICKS) "Bâtonnets" else "Cailloux"
+                                "Revanche lancée ! Tour de l'adversaire ($oppLabel)."
+                            },
+                            canDeclareAbandonment = false,
+                            isOpponentDisconnected = false,
+                            showForfeitConfirmation = false,
+                            gameOverReason = null,
+                            gameDurationSeconds = 0L,
+                            isGameResultRecorded = false,
+                            rematchTimeoutRemainingSeconds = null,
+                            rematchStatusMessage = null,
+                            chatState = state.chatState.copy(
+                                messages = listOf(separatorMsg),
+                                unreadCount = 0
+                            )
+                        )
+                    }
+
+                    startDurationTracking()
+                    startOnlineInactivityMonitoring()
+                    onTurnTransition()
+
+                    if (currentUid != null && currentUid == session.creatorUid) {
+                        viewModelScope.launch {
+                            runCatching {
+                                chatRepository?.postSystemMessage(session.code, "--- Nouvelle partie ---")
+                            }
+                        }
+                    }
+                    return
+                }
+
                 val remoteMoved = prevGameState != session.gameState
                 var onlineMove: PieceMove? = null
 
@@ -2169,16 +2283,28 @@ class WaliViewModel(
             }
             OnlineGameStatus.ABANDONED -> {
                 stopOnlineInactivityMonitoring()
+
+                if (session.abandonedBy?.startsWith("LEFT:") == true && session.abandonedBy != "LEFT:$currentUid") {
+                    handleOpponentLeftDuringRematch()
+                    return
+                }
+
                 val winner = session.winner ?: myRole
                 val isLocalWinner = (winner == myRole)
                 val reasonText = if (isLocalWinner) "Abandon de l'adversaire" else "Abandon"
                 val gameOverState = session.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
-                    moveHistory = session.gameState.moveHistory + if (isLocalWinner) "Victoire par abandon de l'adversaire !" else "Partie terminée par forfait."
+                    moveHistory = if (prevGameState.phase == Phase.GAME_OVER) {
+                        prevGameState.moveHistory
+                    } else {
+                        session.gameState.moveHistory + if (isLocalWinner) "Victoire par abandon de l'adversaire !" else "Partie terminée par forfait."
+                    }
                 )
-                checkPlayEndGameAudio(gameOverState)
-                checkRecordGameOverResult(gameOverState, reasonText)
+                if (prevGameState.winner == null) {
+                    checkPlayEndGameAudio(gameOverState)
+                    checkRecordGameOverResult(gameOverState, reasonText)
+                }
                 stopTurnTimer()
                 viewModelScope.launch {
                     runCatching { storage?.clearSavedGame() }
@@ -2194,9 +2320,16 @@ class WaliViewModel(
                         isOpponentDisconnected = false
                     )
                 }
+                updateRematchCountdownState(session, currentUid)
             }
             OnlineGameStatus.FINISHED -> {
                 stopOnlineInactivityMonitoring()
+
+                if (session.abandonedBy?.startsWith("LEFT:") == true && session.abandonedBy != "LEFT:$currentUid") {
+                    handleOpponentLeftDuringRematch()
+                    return
+                }
+
                 if (session.gameState.winner != null && prevGameState.winner == null) {
                     checkPlayEndGameAudio(session.gameState)
                     checkRecordGameOverResult(session.gameState)
@@ -2210,7 +2343,181 @@ class WaliViewModel(
                         isOpponentDisconnected = false
                     )
                 }
+                updateRematchCountdownState(session, currentUid)
             }
+        }
+    }
+
+    private fun updateRematchCountdownState(session: OnlineGameSession, currentUid: String?) {
+        val myUid = currentUid ?: return
+        val oppUid = session.getOpponentUid(myUid)
+        val onlyMeWaiting = session.rematchRequestedBy.contains(myUid) &&
+                (oppUid == null || !session.rematchRequestedBy.contains(oppUid))
+        if (onlyMeWaiting) {
+            startRematchTimeoutCountdown(session.code)
+        } else {
+            stopRematchTimeoutCountdown()
+        }
+    }
+
+    private fun startRematchTimeoutCountdown(code: String) {
+        if (rematchTimeoutJob?.isActive == true) return
+        val totalSeconds = rematchTimeoutSeconds.coerceAtLeast(1)
+        _uiState.update {
+            it.copy(
+                rematchTimeoutRemainingSeconds = totalSeconds,
+                rematchStatusMessage = null
+            )
+        }
+        rematchTimeoutJob = viewModelScope.launch {
+            for (remaining in (totalSeconds - 1) downTo 1) {
+                delay(1_000L)
+                if (!_uiState.value.isWaitingForRematch) {
+                    _uiState.update { it.copy(rematchTimeoutRemainingSeconds = null) }
+                    return@launch
+                }
+                _uiState.update { it.copy(rematchTimeoutRemainingSeconds = remaining) }
+            }
+            delay(1_000L)
+            if (_uiState.value.isWaitingForRematch) {
+                runCatching { onlineRepository?.cancelRematchRequest(code) }
+                _uiState.update {
+                    it.copy(
+                        rematchTimeoutRemainingSeconds = null,
+                        rematchStatusMessage = "Délai d'attente dépassé (${totalSeconds} s). Demande de revanche annulée.",
+                        feedbackMessage = "Délai d'attente dépassé pour la revanche."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun stopRematchTimeoutCountdown() {
+        rematchTimeoutJob?.cancel()
+        rematchTimeoutJob = null
+        if (_uiState.value.rematchTimeoutRemainingSeconds != null) {
+            _uiState.update { it.copy(rematchTimeoutRemainingSeconds = null) }
+        }
+    }
+
+    private fun handleOpponentLeftDuringRematch() {
+        stopOnlineInactivityMonitoring()
+        stopRematchTimeoutCountdown()
+        onlineSessionJob?.cancel()
+        onlineSessionJob = null
+        chatMessagesJob?.cancel()
+        chatMessagesJob = null
+        _uiState.update {
+            it.copy(
+                onlineGameSession = null,
+                waitingForOpponentCode = null,
+                gameMode = GameMode.TWO_PLAYERS,
+                localPlayerRole = null,
+                canDeclareAbandonment = false,
+                isOpponentDisconnected = false,
+                rematchTimeoutRemainingSeconds = null,
+                rematchStatusMessage = "L'adversaire a quitté le salon",
+                onlineErrorMessage = "L'adversaire a quitté le salon",
+                showModeSelectionDialog = true,
+                feedbackMessage = "L'adversaire a quitté le salon"
+            )
+        }
+    }
+
+    /**
+     * Demande ou accepte une revanche dans le même salon en ligne après la fin d'une partie.
+     */
+    fun requestOnlineRematch() {
+        audio?.playClick()
+        val session = _uiState.value.onlineGameSession ?: return
+        val repo = onlineRepository ?: return
+        val myUid = _uiState.value.localPlayerUid ?: repo.currentUserId
+
+        if (session.abandonedBy?.startsWith("LEFT:") == true && session.abandonedBy != "LEFT:$myUid") {
+            handleOpponentLeftDuringRematch()
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                rematchStatusMessage = null,
+                onlineErrorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            val result = repo.requestRematch(session.code)
+            result.onFailure { error ->
+                val msg = error.message ?: "Impossible de demander la revanche."
+                if (msg.contains("quitté le salon", ignoreCase = true)) {
+                    handleOpponentLeftDuringRematch()
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            rematchStatusMessage = msg,
+                            feedbackMessage = msg
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Annule la demande de revanche en cours du joueur local.
+     */
+    fun cancelOnlineRematchRequest() {
+        audio?.playClick()
+        stopRematchTimeoutCountdown()
+        val session = _uiState.value.onlineGameSession ?: return
+        val repo = onlineRepository ?: return
+
+        _uiState.update {
+            it.copy(
+                rematchTimeoutRemainingSeconds = null,
+                rematchStatusMessage = "Demande de revanche annulée."
+            )
+        }
+
+        viewModelScope.launch {
+            runCatching { repo.cancelRematchRequest(session.code) }
+        }
+    }
+
+    /**
+     * Quitte le salon depuis l'écran de fin de partie en ligne et ramène au menu principal.
+     */
+    fun leaveOnlineSalonAfterGame() {
+        audio?.playClick()
+        val session = _uiState.value.onlineGameSession
+        val code = session?.code ?: _uiState.value.waitingForOpponentCode
+        stopOnlineInactivityMonitoring()
+        stopRematchTimeoutCountdown()
+        onlineSessionJob?.cancel()
+        onlineSessionJob = null
+        chatMessagesJob?.cancel()
+        chatMessagesJob = null
+        preRematchMessageIds = emptySet()
+
+        if (code != null) {
+            viewModelScope.launch {
+                runCatching { onlineRepository?.leaveGame(code) }
+            }
+        }
+
+        _uiState.update {
+            it.copy(
+                onlineGameSession = null,
+                waitingForOpponentCode = null,
+                gameMode = GameMode.TWO_PLAYERS,
+                localPlayerRole = null,
+                canDeclareAbandonment = false,
+                isOpponentDisconnected = false,
+                rematchTimeoutRemainingSeconds = null,
+                rematchStatusMessage = null,
+                showModeSelectionDialog = true,
+                feedbackMessage = "Vous avez quitté le salon."
+            )
         }
     }
 
@@ -2307,10 +2614,18 @@ class WaliViewModel(
                     onlineRepository?.declareAbandonment(session.code, myRole.opponent)
                 }
             }
+        } else if (session != null && (session.status == OnlineGameStatus.FINISHED || session.status == OnlineGameStatus.ABANDONED)) {
+            viewModelScope.launch {
+                runCatching {
+                    onlineRepository?.leaveGame(session.code)
+                }
+            }
         }
         stopOnlineInactivityMonitoring()
+        stopRematchTimeoutCountdown()
         onlineSessionJob?.cancel()
         onlineSessionJob = null
+        preRematchMessageIds = emptySet()
         _uiState.update {
             it.copy(
                 onlineGameSession = null,
@@ -2319,6 +2634,8 @@ class WaliViewModel(
                 localPlayerRole = null,
                 canDeclareAbandonment = false,
                 isOpponentDisconnected = false,
+                rematchTimeoutRemainingSeconds = null,
+                rematchStatusMessage = null,
                 feedbackMessage = null
             )
         }
@@ -2417,6 +2734,7 @@ class WaliViewModel(
         stopTurnTimer()
         durationJob?.cancel()
         stopOnlineInactivityMonitoring()
+        stopRematchTimeoutCountdown()
         aiTurnJob?.cancel()
         onlineSessionJob?.cancel()
         chatMessagesJob?.cancel()

@@ -81,6 +81,16 @@ fun VictoryDialog(
     gameDurationSeconds: Long = 0L,
     scoreboardStats: ScoreboardStats? = null,
     gameOverReason: String? = null,
+    salonMyWins: Int = 0,
+    salonOpponentWins: Int = 0,
+    salonGamesPlayed: Int = 1,
+    isWaitingForRematch: Boolean = false,
+    isRematchRequestedByOpponent: Boolean = false,
+    rematchTimeoutRemainingSeconds: Int? = null,
+    rematchStatusMessage: String? = null,
+    onRequestRematch: (() -> Unit)? = null,
+    onCancelRematch: (() -> Unit)? = null,
+    onLeaveOnlineSalon: (() -> Unit)? = null,
     onOpenScoreboard: (() -> Unit)? = null,
     onNewGameClicked: () -> Unit
 ) {
@@ -204,8 +214,37 @@ fun VictoryDialog(
                     )
                 }
 
-                // Durée de la partie et score persistant
-                Spacer(modifier = Modifier.height(14.dp))
+                // Score cumulé du salon en mode EN LIGNE (indexé par uid)
+                if (gameMode == GameMode.ONLINE) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(colors.accentGold.copy(alpha = 0.14f))
+                            .border(1.dp, colors.accentGold.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("online_salon_score_victory"),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Score du salon : $salonMyWins – $salonOpponentWins",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accentGold
+                            )
+                        )
+                        Text(
+                            text = "Parties jouées dans ce salon : $salonGamesPlayed",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = colors.textSecondary
+                            )
+                        )
+                    }
+                }
+
+                // Durée de la partie et score persistant local
+                Spacer(modifier = Modifier.height(12.dp))
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
@@ -236,26 +275,148 @@ fun VictoryDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                Button(
-                    onClick = onNewGameClicked,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("btn_victory_new_game"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = colors.accentEarth,
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Nouvelle partie",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                    )
+                if (gameMode == GameMode.ONLINE) {
+                    if (!rematchStatusMessage.isNullOrBlank()) {
+                        Text(
+                            text = rematchStatusMessage,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = colors.accentEarth,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .padding(bottom = 8.dp)
+                                .testTag("rematch_status_message")
+                        )
+                    } else if (isRematchRequestedByOpponent && !isWaitingForRematch) {
+                        Text(
+                            text = "Votre adversaire propose une revanche !",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = colors.accentGold,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .padding(bottom = 8.dp)
+                                .testTag("opponent_rematch_offer")
+                        )
+                    }
+
+                    if (isWaitingForRematch) {
+                        val waitText = if (rematchTimeoutRemainingSeconds != null) {
+                            "En attente de l'adversaire… (${rematchTimeoutRemainingSeconds}s)"
+                        } else {
+                            "En attente de l'adversaire…"
+                        }
+                        Text(
+                            text = waitText,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = colors.accentGold,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .padding(bottom = 10.dp)
+                                .testTag("waiting_for_rematch_indicator")
+                        )
+
+                        OutlinedButton(
+                            onClick = { onCancelRematch?.invoke() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("btn_cancel_rematch"),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "Annuler la demande",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.accentEarth
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedButton(
+                            onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("btn_leave_online_salon"),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "Quitter le salon",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            )
+                        }
+                    } else {
+                        Button(
+                            onClick = { (onRequestRematch ?: onNewGameClicked).invoke() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("btn_online_rematch"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.accentEarth,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Revanche",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedButton(
+                            onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("btn_leave_online_salon"),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "Quitter le salon",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = onNewGameClicked,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("btn_victory_new_game"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.accentEarth,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Nouvelle partie",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
                 }
 
                 if (onOpenScoreboard != null) {

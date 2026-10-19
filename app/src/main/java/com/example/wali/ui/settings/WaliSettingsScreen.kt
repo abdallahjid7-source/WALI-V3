@@ -86,6 +86,7 @@ fun WaliSettingsScreen(
     timerDurationSeconds: Int = 30,
     isMandatoryAlignmentEnabled: Boolean = false,
     isDefeatAtTwoPiecesEnabled: Boolean = false,
+    isCellNumbersEnabled: Boolean = true,
     onSfxVolumeChanged: (Float) -> Unit,
     onMusicVolumeChanged: (Float) -> Unit,
     onMutedChanged: (Boolean) -> Unit,
@@ -94,6 +95,7 @@ fun WaliSettingsScreen(
     onTimerDurationChanged: (Int) -> Unit = {},
     onMandatoryAlignmentChanged: (Boolean) -> Unit = {},
     onDefeatAtTwoPiecesChanged: (Boolean) -> Unit = {},
+    onCellNumbersEnabledChanged: (Boolean) -> Unit = {},
     onOpenScoreboard: (() -> Unit)? = null,
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -209,10 +211,12 @@ fun WaliSettingsScreen(
                 }
 
                 item {
-                    // Section 4 : Thèmes visuels
+                    // Section 4 : Thèmes visuels & affichage du plateau
                     ThemeSelectionCard(
                         currentPalette = selectedPalette,
-                        onThemeSelected = onThemeSelected
+                        onThemeSelected = onThemeSelected,
+                        isCellNumbersEnabled = isCellNumbersEnabled,
+                        onCellNumbersEnabledChanged = onCellNumbersEnabledChanged
                     )
                 }
 
@@ -512,7 +516,9 @@ private fun AudioSettingsCard(
 @Composable
 private fun ThemeSelectionCard(
     currentPalette: WaliThemePalette,
-    onThemeSelected: (WaliThemePalette) -> Unit
+    onThemeSelected: (WaliThemePalette) -> Unit,
+    isCellNumbersEnabled: Boolean = true,
+    onCellNumbersEnabledChanged: (Boolean) -> Unit = {}
 ) {
     val colors = LocalWaliColors.current
 
@@ -547,6 +553,49 @@ private fun ThemeSelectionCard(
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
                         color = colors.textPrimary
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Option d'affichage des numéros de cases (1 à 30)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.surfaceAlt.copy(alpha = 0.5f))
+                    .clickable { onCellNumbersEnabledChanged(!isCellNumbersEnabled) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        text = "Numéroter les cases (1 à 30)",
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary
+                        )
+                    )
+                    Text(
+                        text = "Affiche un numéro discret dans chaque case pour faciliter les échanges dans le chat",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = colors.textSecondary,
+                            fontSize = 11.sp
+                        )
+                    )
+                }
+
+                Switch(
+                    checked = isCellNumbersEnabled,
+                    onCheckedChange = onCellNumbersEnabledChanged,
+                    modifier = Modifier.testTag("switch_cell_numbers_enabled"),
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = colors.accentEarth,
+                        uncheckedThumbColor = colors.textSecondary,
+                        uncheckedTrackColor = colors.surface
                     )
                 )
             }
