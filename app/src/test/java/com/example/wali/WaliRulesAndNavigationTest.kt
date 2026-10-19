@@ -180,4 +180,44 @@ class WaliRulesAndNavigationTest {
         composeTestRule.onNodeWithTag("cell_number_A1", useUnmergedTree = true).assertDoesNotExist()
         composeTestRule.onNodeWithTag("cell_number_F2", useUnmergedTree = true).assertDoesNotExist()
     }
+
+    @Test
+    fun `online screen renders spectateurs tab and waiting room displays both player and spectator codes`() {
+        var spectatedCode: String? = null
+        val waitingCodeState = androidx.compose.runtime.mutableStateOf<String?>(null)
+
+        composeTestRule.setContent {
+            com.example.wali.ui.online.WaliOnlineScreen(
+                waitingForOpponentCode = waitingCodeState.value,
+                waitingSpectatorCode = "S765432",
+                publicWaitingGames = emptyList(),
+                isLoading = false,
+                errorMessage = null,
+                onCreateGame = { _, _ -> },
+                onJoinGame = {},
+                onSpectateGame = { spectatedCode = it },
+                onCancelWaiting = {},
+                onDismissError = {},
+                onNavigateBack = {}
+            )
+        }
+
+        // L'onglet Spectateurs existe à côté de Créer et Rejoindre
+        composeTestRule.onNodeWithTag("online_tab_spectator").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("online_tab_spectator").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("online_spectator_code_input").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("online_spectator_join_button").assertIsDisplayed()
+
+        // Passage en salle d'attente : les deux codes (joueur et spectateur) sont affichés avec leurs boutons copier/partager
+        waitingCodeState.value = "PL2345"
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("waiting_code_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("waiting_spectator_code_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("copy_spectator_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("share_spectator_code_button").assertIsDisplayed()
+    }
 }
+

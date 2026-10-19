@@ -131,6 +131,7 @@ fun WaliChatButton(
 fun WaliChatPanel(
     chatState: WaliChatUiState,
     localPlayerRole: Player?,
+    localPlayerUid: String? = null,
     isLandscape: Boolean,
     onClose: () -> Unit,
     onSendMessage: (String) -> Unit,
@@ -327,9 +328,11 @@ fun WaliChatPanel(
                 }
 
                 items(chatState.messages, key = { it.id.ifBlank { it.timestamp.toString() } }) { msg ->
+                    val isMine = (!localPlayerUid.isNullOrBlank() && msg.senderUid == localPlayerUid) ||
+                            (localPlayerRole != null && msg.senderRole == localPlayerRole)
                     ChatBubbleItem(
                         message = msg,
-                        isMine = msg.senderRole == localPlayerRole,
+                        isMine = isMine,
                         localPlayerRole = localPlayerRole
                     )
                 }
@@ -486,12 +489,19 @@ private fun ChatBubbleItem(
     val borderColor = if (isMine) colors.accentGold.copy(alpha = 0.6f) else colors.gridLine.copy(alpha = 0.3f)
     val alignment = if (isMine) Alignment.CenterEnd else Alignment.CenterStart
 
+    val isSpectatorMsg = message.isSpectator || message.senderRole == null
     val roleLabel = when (message.senderRole) {
         Player.STICKS -> "Bâtonnets"
         Player.STONES -> "Cailloux"
-        null -> ""
+        null -> "Spectateur"
     }
-    val authorLabel = if (isMine) "Vous ($roleLabel)" else "Adversaire ($roleLabel)"
+    val authorLabel = when {
+        isMine && isSpectatorMsg -> "Vous (Spectateur)"
+        isMine -> "Vous ($roleLabel)"
+        isSpectatorMsg -> "Spectateur"
+        localPlayerRole == null -> "Joueur ($roleLabel)"
+        else -> "Adversaire ($roleLabel)"
+    }
 
     Box(
         modifier = Modifier.fillMaxWidth(),

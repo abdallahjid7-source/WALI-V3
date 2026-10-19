@@ -25,6 +25,7 @@ class FirestoreWaliOnlineRepository(
         const val COLLECTION_GAMES = "games"
 
         const val FIELD_CODE = "code"
+        const val FIELD_SPECTATOR_CODE = "spectatorCode"
         const val FIELD_IS_PUBLIC = "isPublic"
         const val FIELD_STATUS = "status"
         const val FIELD_CREATOR_UID = "creatorUid"
@@ -43,6 +44,7 @@ class FirestoreWaliOnlineRepository(
         const val FIELD_GAMES_PLAYED = "gamesPlayed"
         const val FIELD_STATS_BY_UID = "statsByUid"
         const val FIELD_LAST_SCORED_GAME_INDEX = "lastScoredGameIndex"
+        private const val MAX_SPECTATOR_CODE_ATTEMPTS = 5
 
         @Volatile
         private var fallbackAnonymousUid: String? = null
@@ -93,6 +95,24 @@ class FirestoreWaliOnlineRepository(
                 throw IllegalStateException("Un salon avec ce code existe déjà.")
             }
 
+            // Génération d'un spectatorCode de 7 caractères ('S' + 6 caractères) avec vérification
+            // d'unicité globale sur toute la collection "games" (requête simple à 1 champ, zéro index composite requis).
+            var spectatorCode = WaliOnlineCodeGenerator.generateSpectatorCode()
+            for (attempt in 1..MAX_SPECTATOR_CODE_ATTEMPTS) {
+                val candidate = WaliOnlineCodeGenerator.generateSpectatorCode()
+                val duplicateSnap = runCatching {
+                    firestore.collection(COLLECTION_GAMES)
+                        .whereEqualTo(FIELD_SPECTATOR_CODE, candidate)
+                        .limit(1)
+                        .get()
+                        .await()
+                }.getOrNull()
+                if (duplicateSnap == null || duplicateSnap.isEmpty) {
+                    spectatorCode = candidate
+                    break
+                }
+            }
+
             val now = System.currentTimeMillis()
             val stateJson = WaliGameSerializer.serializeGameState(initialGameState)
             val playersMap = mapOf(uid to creatorSide.name)
@@ -100,6 +120,7 @@ class FirestoreWaliOnlineRepository(
 
             val data = hashMapOf<String, Any?>(
                 FIELD_CODE to code,
+                FIELD_SPECTATOR_CODE to spectatorCode,
                 FIELD_IS_PUBLIC to isPublic,
                 FIELD_STATUS to OnlineGameStatus.WAITING.value,
                 FIELD_CREATOR_UID to uid,
@@ -124,6 +145,7 @@ class FirestoreWaliOnlineRepository(
 
             OnlineGameSession(
                 code = code,
+                spectatorCode = spectatorCode,
                 isPublic = isPublic,
                 status = OnlineGameStatus.WAITING,
                 creatorUid = uid,
@@ -207,6 +229,42 @@ class FirestoreWaliOnlineRepository(
         }
     }
 
+    override suspend fun joinAsSpectator(spectatorCode: String): Result<OnlineGameSession> {
+        return runCatching {
+            val uid = ensureAuthenticated()
+            if (uid.isBlank()) {
+                throw IllegalStateException("Authentification Firebase requise.")
+            }
+
+            val normalized = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+            if (!WaliOnlineCodeGenerator.isValidSpectatorCode(normalized)) {
+                throw IllegalArgumentException("Code spectateur invalide.")
+            }
+
+            val session = findGameBySpectatorCode(normalized)
+                ?: throw IllegalArgumentException("Aucun salon trouvé pour ce code spectateur.")
+
+            session
+        }
+    }
+
+    override suspend fun findGameBySpectatorCode(spectatorCode: String): OnlineGameSession? {
+        return runCatching {
+            val normalized = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+            if (!WaliOnlineCodeGenerator.isValidSpectatorCode(normalized)) return null
+
+            val snapshot = firestore.collection(COLLECTION_GAMES)
+                .whereEqualTo(FIELD_SPECTATOR_CODE, normalized)
+                .get()
+                .await()
+
+            if (snapshot.isEmpty) return null
+
+            val candidates = snapshot.documents.mapNotNull { doc -> parseSession(doc) }
+            selectDeterministicSpectatorSession(candidates)
+        }.getOrNull()
+    }
+
     override fun observeGame(code: String): Flow<OnlineGameSession?> = callbackFlow {
         val docRef = firestore.collection(COLLECTION_GAMES).document(code)
         val registration = docRef.addSnapshotListener { snapshot, error ->
@@ -271,6 +329,7 @@ class FirestoreWaliOnlineRepository(
             val now = System.currentTimeMillis()
             val stateJson = WaliGameSerializer.serializeGameState(newGameState)
             val isGameEnding = newGameState.winner != null || newGameState.phase == com.example.wali.model.Phase.GAME_OVER
+            val myUid = currentUserId
 
             if (!isGameEnding) {
                 val updates = mapOf<String, Any?>(
@@ -285,6 +344,11 @@ class FirestoreWaliOnlineRepository(
                     val snapshot = transaction.get(docRef)
                     if (!snapshot.exists()) return@runTransaction null
                     val session = parseSession(snapshot) ?: return@runTransaction null
+
+                    // Garde spectateur : seuls les deux joueurs participants peuvent muter le salon
+                    if (!session.isParticipant(myUid)) {
+                        return@runTransaction null
+                    }
 
                     if (session.status != OnlineGameStatus.ONGOING) {
                         return@runTransaction null
@@ -318,6 +382,7 @@ class FirestoreWaliOnlineRepository(
         return runCatching {
             val docRef = firestore.collection(COLLECTION_GAMES).document(code)
             val now = System.currentTimeMillis()
+            val myUid = currentUserId
 
             // Fin de manche par forfait ou inactivité : transaction atomique et idempotente.
             // Règle de course : le premier écrit gagne. Si status != ONGOING, on ne réécrit ni winner, ni abandonedBy, ni statsByUid.
@@ -326,13 +391,19 @@ class FirestoreWaliOnlineRepository(
                 if (!snapshot.exists()) return@runTransaction null
                 val session = parseSession(snapshot) ?: return@runTransaction null
 
+                // Garde spectateur : un spectateur ne peut jamais déclarer d'abandon
+                if (!session.isParticipant(myUid)) {
+                    return@runTransaction null
+                }
+
                 if (session.status != OnlineGameStatus.ONGOING) {
                     return@runTransaction null
                 }
 
-                // Point 1 : abandonedBy désigne toujours le joueur qui a abandonné (camp perdant = winnerPlayer.opponent)
-                val abandonedByUid = session.resolveParticipantUidForRole(winnerPlayer.opponent)
-                    ?: currentUserId
+                // Point 1 & Vérification 1 : abandonedBy désigne toujours le joueur qui a abandonné
+                // (camp perdant = winnerPlayer.opponent). Aucun repli sur currentUserId : si le salon
+                // est incomplet, abandonedBy reste honnêtement null.
+                val abandonedByUid: String? = session.resolveParticipantUidForRole(winnerPlayer.opponent)
 
                 val (updatedStats, newLastScoredIndex) = computeScoredSalonState(
                     session = session,
@@ -393,13 +464,22 @@ class FirestoreWaliOnlineRepository(
             val snapshot = docRef.get().await()
             if (!snapshot.exists()) return Result.success(Unit)
 
+            val myUid = currentUserId
+            val creatorUid = snapshot.getString(FIELD_CREATOR_UID) ?: ""
+            val opponentUid = snapshot.getString(FIELD_OPPONENT_UID)
+
+            // Garde spectateur : quitter le salon pour un spectateur ne doit ni supprimer le salon en attente
+            // ni écrire LEFT:<uid> dans abandonedBy.
+            if (myUid != creatorUid && myUid != opponentUid) {
+                return Result.success(Unit)
+            }
+
             val status = snapshot.getString(FIELD_STATUS)
-            if (status == OnlineGameStatus.WAITING.value) {
-                // Si la partie était en attente, la supprimer pour nettoyer le lobby
+            if (status == OnlineGameStatus.WAITING.value && myUid == creatorUid) {
+                // Si la partie était en attente et que c'est le créateur qui quitte, la supprimer pour nettoyer le lobby
                 docRef.delete().await()
             } else if (status == OnlineGameStatus.FINISHED.value || status == OnlineGameStatus.ABANDONED.value) {
                 // Signale à l'autre joueur en attente de revanche que ce joueur a quitté le salon
-                val myUid = currentUserId
                 docRef.update(
                     mapOf(
                         FIELD_ABANDONED_BY to "LEFT:$myUid",
@@ -567,6 +647,7 @@ class FirestoreWaliOnlineRepository(
 
     private fun parseSession(doc: DocumentSnapshot): OnlineGameSession? {
         val code = doc.getString(FIELD_CODE) ?: doc.id
+        val spectatorCode = doc.getString(FIELD_SPECTATOR_CODE)
         val isPublic = doc.getBoolean(FIELD_IS_PUBLIC) ?: false
         val status = OnlineGameStatus.fromValue(doc.getString(FIELD_STATUS))
         val creatorUid = doc.getString(FIELD_CREATOR_UID) ?: return null
@@ -601,6 +682,7 @@ class FirestoreWaliOnlineRepository(
 
         return OnlineGameSession(
             code = code,
+            spectatorCode = spectatorCode,
             isPublic = isPublic,
             status = status,
             creatorUid = creatorUid,

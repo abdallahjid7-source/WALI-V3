@@ -28,6 +28,7 @@ class FirestoreWaliChatRepository(
 
         private const val FIELD_SENDER_ROLE = "senderRole"
         private const val FIELD_SENDER_UID = "senderUid"
+        private const val FIELD_IS_SPECTATOR = "isSpectator"
         private const val FIELD_TEXT = "text"
         private const val FIELD_TYPE = "type"
         private const val FIELD_TIMESTAMP = "timestamp"
@@ -59,6 +60,7 @@ class FirestoreWaliChatRepository(
                         val senderRoleStr = doc.getString(FIELD_SENDER_ROLE)
                         val senderRole = senderRoleStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
                         val senderUid = doc.getString(FIELD_SENDER_UID) ?: ""
+                        val isSpectator = doc.getBoolean(FIELD_IS_SPECTATOR) ?: (senderRole == null && senderUid.isNotBlank())
                         val text = doc.getString(FIELD_TEXT) ?: ""
                         val typeStr = doc.getString(FIELD_TYPE) ?: ChatMessageType.FREE_TEXT.name
                         val type = runCatching { ChatMessageType.valueOf(typeStr) }.getOrDefault(ChatMessageType.FREE_TEXT)
@@ -71,6 +73,7 @@ class FirestoreWaliChatRepository(
                             id = id,
                             senderRole = senderRole,
                             senderUid = senderUid,
+                            isSpectator = isSpectator,
                             text = text,
                             timestamp = timestamp,
                             type = type
@@ -105,6 +108,7 @@ class FirestoreWaliChatRepository(
             val data = hashMapOf(
                 FIELD_SENDER_ROLE to (message.senderRole?.name ?: ""),
                 FIELD_SENDER_UID to message.senderUid,
+                FIELD_IS_SPECTATOR to message.isSpectator,
                 FIELD_TEXT to validatedText,
                 FIELD_TYPE to message.type.name,
                 FIELD_TIMESTAMP to FieldValue.serverTimestamp()

@@ -21,10 +21,21 @@ enum class OnlineGameStatus(val value: String) {
 }
 
 /**
+ * Rôle d'un utilisateur connecté à un salon en ligne.
+ * Source unique de vérité pour distinguer les deux joueurs actifs d'un spectateur.
+ */
+enum class OnlineRole {
+    CREATOR,
+    OPPONENT,
+    SPECTATOR
+}
+
+/**
  * Modèle complet représentant une session de partie en ligne synchronisée via Firestore.
  *
  * Structure d'un document de la collection "games" :
- * - code : code court alphanumérique à 6 caractères
+ * - code : code court alphanumérique à 6 caractères (pour l'adversaire)
+ * - spectatorCode : code court à 7 caractères commençant par 'S' (pour les spectateurs)
  * - isPublic : visibilité dans la liste publique
  * - status : "waiting" / "ongoing" / "finished" / "abandoned"
  * - players : Map<uid, role> ("STICKS" ou "STONES")
@@ -40,6 +51,7 @@ enum class OnlineGameStatus(val value: String) {
  */
 data class OnlineGameSession(
     val code: String,
+    val spectatorCode: String? = null,
     val isPublic: Boolean,
     val status: OnlineGameStatus,
     val creatorUid: String,
@@ -63,7 +75,20 @@ data class OnlineGameSession(
     val lastScoredGameIndex: Int = 0
 ) {
     /**
+     * Retourne le rôle en ligne ([OnlineRole]) de [uid] dans cette session.
+     */
+    fun getOnlineRole(uid: String?): OnlineRole? {
+        if (uid.isNullOrBlank()) return null
+        return when {
+            uid == creatorUid -> OnlineRole.CREATOR
+            uid == opponentUid -> OnlineRole.OPPONENT
+            else -> OnlineRole.SPECTATOR
+        }
+    }
+
+    /**
      * Retourne le camp (Player) attribué à un UID donné dans cette session.
+     * Retourne strictement null pour un spectateur.
      */
     fun getPlayerRole(uid: String): Player? {
         val roleStr = players[uid] ?: if (uid == creatorUid) creatorPlayer.name else if (uid == opponentUid) opponentPlayer?.name else null
@@ -106,9 +131,11 @@ data class OnlineGameSession(
     }
 
     /**
-     * Vrai si l'utilisateur avec cet UID participe à cette partie.
+     * Vrai si l'utilisateur avec cet UID participe activement à cette partie (créateur ou adversaire).
+     * Retourne false pour un spectateur.
      */
     fun isParticipant(uid: String): Boolean {
+        if (uid.isBlank()) return false
         return uid == creatorUid || uid == opponentUid || players.containsKey(uid)
     }
 
@@ -119,6 +146,41 @@ data class OnlineGameSession(
         val role = getPlayerRole(uid) ?: return false
         return gameState.currentPlayer == role && status == OnlineGameStatus.ONGOING
     }
+}
+
+/**
+ * Sélectionne de manière strictement déterministe le salon cible lorsqu'une requête par
+ * `spectatorCode` retourne un ou plusieurs documents (protection en lecture contre les collisions).
+ *
+ * Ordre de priorité :
+ * 1. Salons actifs d'abord : ONGOING (priorité 3) > WAITING (priorité 2) > FINISHED (priorité 1) > ABANDONED (priorité 0)
+ * 2. Activité la plus récente (`lastMoveAt` décroissant)
+ * 3. Création la plus récente (`createdAt` décroissant)
+ * 4. Ordre lexicographique du `code` (déterminisme total en cas d'égalité parfaite d'horodatage)
+ */
+fun selectDeterministicSpectatorSession(candidates: List<OnlineGameSession>): OnlineGameSession? {
+    if (candidates.isEmpty()) return null
+    if (candidates.size == 1) return candidates.first()
+
+    fun statusRank(status: OnlineGameStatus): Int = when (status) {
+        OnlineGameStatus.ONGOING -> 3
+        OnlineGameStatus.WAITING -> 2
+        OnlineGameStatus.FINISHED -> 1
+        OnlineGameStatus.ABANDONED -> 0
+    }
+
+    return candidates.WithDeterministicOrder(::statusRank).firstOrNull()
+}
+
+private fun List<OnlineGameSession>.WithDeterministicOrder(
+    statusRank: (OnlineGameStatus) -> Int
+): List<OnlineGameSession> {
+    return this.sortedWith(
+        compareByDescending<OnlineGameSession> { statusRank(it.status) }
+            .thenByDescending { it.lastMoveAt }
+            .thenByDescending { it.createdAt }
+            .thenBy { it.code }
+    )
 }
 
 /**
@@ -138,14 +200,20 @@ data class PublicGameItem(
  * Utilise un jeu de caractères sans ambiguïté visuelle :
  * - Chiffres 2 à 9 (sans 0 ni 1)
  * - Lettres majuscules A à Z (sans O ni I)
+ *
+ * Format des codes :
+ * - Code joueur : exactement 6 caractères alphanumériques (ex: "W7K9M2")
+ * - Code spectateur : exactement 7 caractères commençant par 'S' suivi de 6 caractères (ex: "SW7K9M2")
  */
 object WaliOnlineCodeGenerator {
 
-    private const val CODE_LENGTH = 6
+    const val CODE_LENGTH = 6
+    const val SPECTATOR_CODE_LENGTH = 7
+    const val SPECTATOR_PREFIX = 'S'
     private const val ALLOWED_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
     /**
-     * Génère un code aléatoire de 6 caractères alphanumériques lisibles.
+     * Génère un code joueur aléatoire de 6 caractères alphanumériques lisibles.
      */
     fun generateCode(): String {
         val sb = StringBuilder(CODE_LENGTH)
@@ -157,12 +225,30 @@ object WaliOnlineCodeGenerator {
     }
 
     /**
-     * Vérifie si un code saisi respecte le format attendu (exactement 6 caractères alphanumériques).
+     * Génère un code spectateur aléatoire de 7 caractères ('S' + 6 caractères alphanumériques lisibles).
+     */
+    fun generateSpectatorCode(): String {
+        return "$SPECTATOR_PREFIX${generateCode()}"
+    }
+
+    /**
+     * Vérifie si un code saisi respecte le format attendu d'un code joueur (exactement 6 caractères alphanumériques).
      */
     fun isValidCode(code: String): Boolean {
         val trimmed = code.trim().uppercase()
         if (trimmed.length != CODE_LENGTH) return false
         return trimmed.all { it.isLetterOrDigit() }
+    }
+
+    /**
+     * Vérifie si un code saisi respecte le format attendu d'un code spectateur
+     * (exactement 7 caractères alphanumériques commençant par 'S').
+     */
+    fun isValidSpectatorCode(code: String): Boolean {
+        val trimmed = code.trim().uppercase()
+        if (trimmed.length != SPECTATOR_CODE_LENGTH) return false
+        if (trimmed.first() != SPECTATOR_PREFIX) return false
+        return trimmed.drop(1).all { it.isLetterOrDigit() }
     }
 
     /**

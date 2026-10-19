@@ -18,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.example.ui.theme.MyApplicationTheme
 import com.example.wali.online.OnlineGameStatus
+import com.example.wali.online.WaliOnlineCodeGenerator
 import com.example.wali.ui.online.WaliOnlineScreen
 import com.example.wali.ui.WaliGameScreen
 import com.example.wali.ui.WaliViewModel
@@ -63,9 +64,12 @@ fun WaliApp(
         gameViewModel.setSecondaryScreenOpen(isSecondary)
     }
 
-    // Bascule automatique vers l'échiquier dès qu'un adversaire rejoint la session en attente
-    LaunchedEffect(uiState.onlineGameSession?.status, currentRoute) {
-        if (uiState.onlineGameSession?.status == OnlineGameStatus.ONGOING && currentRoute == WaliDestinations.ONLINE) {
+    // Bascule automatique vers l'échiquier dès qu'un adversaire rejoint la session en attente ou qu'un spectateur a chargé le salon
+    LaunchedEffect(uiState.onlineGameSession?.status, uiState.isSpectator, uiState.onlineGameSession?.code, currentRoute) {
+        val session = uiState.onlineGameSession
+        if (currentRoute == WaliDestinations.ONLINE && session != null &&
+            (session.status == OnlineGameStatus.ONGOING || uiState.isSpectator)
+        ) {
             navController.popBackStack()
         }
     }
@@ -192,6 +196,7 @@ fun WaliApp(
                 val activeOptions = uiState.onlineGameSession?.gameState?.ruleOptions
                 WaliOnlineScreen(
                     waitingForOpponentCode = uiState.waitingForOpponentCode,
+                    waitingSpectatorCode = uiState.spectatorCode,
                     publicWaitingGames = uiState.publicWaitingGames,
                     isLoading = uiState.isOnlineLoading,
                     errorMessage = uiState.onlineErrorMessage,
@@ -202,7 +207,12 @@ fun WaliApp(
                     },
                     onJoinGame = { code ->
                         gameViewModel.startJoinOnlineGame(code)
-                        navController.popBackStack()
+                        if (WaliOnlineCodeGenerator.isValidCode(code)) {
+                            navController.popBackStack()
+                        }
+                    },
+                    onSpectateGame = { spectatorCode ->
+                        gameViewModel.startSpectateOnlineGame(spectatorCode)
                     },
                     onCancelWaiting = {
                         gameViewModel.cancelOnlineWaiting()

@@ -58,9 +58,12 @@ fun ScoreHeader(
     timerDurationSeconds: Int = 30,
     isTimerPaused: Boolean = false,
     localPlayerRole: Player? = null,
+    isSpectator: Boolean = false,
     gameDurationSeconds: Long = 0L,
     salonMyWins: Int = 0,
     salonOpponentWins: Int = 0,
+    salonSticksPlayerWins: Int = 0,
+    salonStonesPlayerWins: Int = 0,
     salonGamesPlayed: Int = 1,
     isCompact: Boolean = false,
     modifier: Modifier = Modifier
@@ -82,7 +85,11 @@ fun ScoreHeader(
 
         val modeLabel = when (gameMode) {
             GameMode.VS_COMPUTER -> if (isCompact) " • IA" else " • vs Machine"
-            GameMode.ONLINE -> if (isCompact) " • Ligne" else " • En Ligne"
+            GameMode.ONLINE -> when {
+                isSpectator -> if (isCompact) " • Spectateur" else " • Mode Spectateur"
+                isCompact -> " • Ligne"
+                else -> " • En Ligne"
+            }
             else -> if (isCompact) " • 2J" else " • 2 Joueurs"
         }
 
@@ -151,7 +158,11 @@ fun ScoreHeader(
                     .testTag("online_salon_score_header")
             ) {
                 Text(
-                    text = "Score du salon : $salonMyWins – $salonOpponentWins • Parties : $salonGamesPlayed",
+                    text = if (isSpectator) {
+                        "Score du salon : Bâtons $salonSticksPlayerWins – $salonStonesPlayerWins Cailloux • Parties : $salonGamesPlayed"
+                    } else {
+                        "Score du salon : $salonMyWins – $salonOpponentWins • Parties : $salonGamesPlayed"
+                    },
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontWeight = FontWeight.SemiBold,
                         color = waliColors.accentGold
@@ -178,12 +189,16 @@ fun ScoreHeader(
             // Carte BÂTONNETS
             val sticksSubtitle = when (gameMode) {
                 GameMode.VS_COMPUTER -> if (humanPlayer == Player.STICKS) " (Vous)" else " (Machine)"
-                GameMode.ONLINE -> if (localPlayerRole == Player.STICKS) " (Vous)" else " (Adversaire)"
+                GameMode.ONLINE -> when {
+                    isSpectator -> ""
+                    localPlayerRole == Player.STICKS -> " (Vous)"
+                    else -> " (Adversaire)"
+                }
                 else -> ""
             }
 
             val isSticksTimerActive = if (gameMode == GameMode.ONLINE) {
-                isSticksActive && isTimerEnabled
+                isSticksActive && isTimerEnabled && !isSpectator
             } else {
                 isSticksActive && isTimerEnabled && !isAiCurrentlyPlaying
             }
@@ -207,12 +222,16 @@ fun ScoreHeader(
             // Carte CAILLOUX
             val stonesSubtitle = when (gameMode) {
                 GameMode.VS_COMPUTER -> if (humanPlayer == Player.STONES) " (Vous)" else " (Machine)"
-                GameMode.ONLINE -> if (localPlayerRole == Player.STONES) " (Vous)" else " (Adversaire)"
+                GameMode.ONLINE -> when {
+                    isSpectator -> ""
+                    localPlayerRole == Player.STONES -> " (Vous)"
+                    else -> " (Adversaire)"
+                }
                 else -> ""
             }
 
             val isStonesTimerActive = if (gameMode == GameMode.ONLINE) {
-                isStonesActive && isTimerEnabled
+                isStonesActive && isTimerEnabled && !isSpectator
             } else {
                 isStonesActive && isTimerEnabled && !isAiCurrentlyPlaying
             }
@@ -245,7 +264,15 @@ fun ScoreHeader(
             if (isAiThinking || isAiCurrentlyPlaying) {
                 "L'ordinateur joue..."
             } else if (gameMode == GameMode.ONLINE) {
-                if (isCaptureActive) {
+                if (isSpectator) {
+                    if (isCaptureActive) {
+                        "★ Les $activePlayerName effectuent une capture…"
+                    } else if (isPlacementRequired) {
+                        "★ Les $activePlayerName posent leur pion en attente…"
+                    } else {
+                        "Observation en direct • Tour des $activePlayerName"
+                    }
+                } else if (isCaptureActive) {
                     if (gameState.currentPlayer == localPlayerRole) "★ Ligne formée ! Choisissez 1 pion adverse à capturer"
                     else "L'adversaire effectue une capture..."
                 } else if (isPlacementRequired) {

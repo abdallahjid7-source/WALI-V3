@@ -472,8 +472,12 @@ class WaliViewModel(
             return
         }
 
-        // En mode en ligne, bloquer si la session n'est pas active ou si ce n'est pas le tour du joueur local
+        // En mode en ligne, bloquer si l'utilisateur est spectateur, si la session n'est pas active ou si ce n'est pas son tour
         if (state.gameMode == GameMode.ONLINE) {
+            if (state.isSpectator) {
+                _uiState.update { it.copy(feedbackMessage = "Mode spectateur : observation uniquement.") }
+                return
+            }
             if (state.onlineGameSession?.status != OnlineGameStatus.ONGOING) {
                 return
             }
@@ -729,7 +733,9 @@ class WaliViewModel(
                 audio?.playDefeat()
             }
         } else if (mode == GameMode.ONLINE) {
-            if (winner == localRole) {
+            if (_uiState.value.isSpectator) {
+                audio?.playVictory()
+            } else if (winner == localRole) {
                 audio?.playVictory()
             } else {
                 audio?.playDefeat()
@@ -742,9 +748,11 @@ class WaliViewModel(
     /**
      * Enregistre le résultat de la partie et sa durée dans le tableau des scores persisté via DataStore.
      * Garantit qu'une même partie terminée n'est comptabilisée qu'une seule fois.
+     * Ne comptabilise jamais une partie observée en tant que spectateur dans le bilan personnel.
      */
     fun checkRecordGameOverResult(state: GameState, customReason: String? = null) {
         val current = _uiState.value
+        if (current.isSpectator) return
         if (current.isGameResultRecorded) return
         val winner = state.winner ?: return
 
@@ -844,6 +852,7 @@ class WaliViewModel(
      */
     fun onCaptureTargetSelected(targetPosition: Position) {
         val state = _uiState.value
+        if (state.isSpectator) return
         val currentGameState = state.gameState
 
         if (!WaliEngine.canCapture(currentGameState)) {
@@ -1109,6 +1118,7 @@ class WaliViewModel(
             showForfeitConfirmation = false,
             gameOverReason = null,
             onlineGameSession = if (mode == GameMode.ONLINE) _uiState.value.onlineGameSession else null,
+            onlineRole = if (mode == GameMode.ONLINE) _uiState.value.onlineRole else null,
             waitingForOpponentCode = if (mode == GameMode.ONLINE) _uiState.value.waitingForOpponentCode else null,
             localPlayerRole = if (mode == GameMode.ONLINE) _uiState.value.localPlayerRole else null,
             canDeclareAbandonment = false,
@@ -1377,7 +1387,7 @@ class WaliViewModel(
     fun startTurnTimer() {
         timerJob?.cancel()
         val state = _uiState.value
-        if (!state.isTimerEnabled || state.gameState.phase == Phase.GAME_OVER || state.isAiTurn) {
+        if (state.isSpectator || !state.isTimerEnabled || state.gameState.phase == Phase.GAME_OVER || state.isAiTurn) {
             return
         }
 
@@ -1417,7 +1427,7 @@ class WaliViewModel(
      */
     fun tickTimer() {
         val current = _uiState.value
-        if (!current.isTimerEnabled || current.gameState.phase == Phase.GAME_OVER || current.isAiTurn) {
+        if (current.isSpectator || !current.isTimerEnabled || current.gameState.phase == Phase.GAME_OVER || current.isAiTurn) {
             return
         }
         if (current.isTimerPaused) {
@@ -1448,7 +1458,7 @@ class WaliViewModel(
      */
     fun onTurnTransition() {
         val state = _uiState.value
-        if (state.gameState.winner != null || state.gameState.phase == Phase.GAME_OVER) {
+        if (state.isSpectator || state.gameState.winner != null || state.gameState.phase == Phase.GAME_OVER) {
             stopTurnTimer()
             return
         }
@@ -1462,12 +1472,13 @@ class WaliViewModel(
 
     /**
      * Exécute un coup légal aléatoire lorsque le temps du joueur humain est écoulé.
+     * Ne s'exécute jamais pour un spectateur.
      */
     fun handleTimerExpired() {
         val state = _uiState.value
         val currentGameState = state.gameState
 
-        if (currentGameState.phase == Phase.GAME_OVER || state.isAiTurn || !state.isTimerEnabled) {
+        if (state.isSpectator || currentGameState.phase == Phase.GAME_OVER || state.isAiTurn || !state.isTimerEnabled) {
             return
         }
 
@@ -1673,6 +1684,7 @@ class WaliViewModel(
                     it.copy(
                         isOnlineLoading = false,
                         gameMode = GameMode.ONLINE,
+                        onlineRole = com.example.wali.online.OnlineRole.CREATOR,
                         localPlayerUid = uid,
                         localPlayerRole = chosenSide,
                         waitingForOpponentCode = session.code,
@@ -1695,7 +1707,7 @@ class WaliViewModel(
     }
 
     /**
-     * Rejoint une partie en ligne existante via son code de 6 caractères.
+     * Rejoint une partie en ligne existante via son code joueur de 6 caractères.
      */
     fun startJoinOnlineGame(code: String) {
         audio?.playClick()
@@ -1720,11 +1732,17 @@ class WaliViewModel(
                 } else {
                     session.opponentPlayer ?: session.creatorPlayer.opponent
                 }
+                val resolvedOnlineRole = if (session.creatorUid == uid) {
+                    com.example.wali.online.OnlineRole.CREATOR
+                } else {
+                    com.example.wali.online.OnlineRole.OPPONENT
+                }
 
                 _uiState.update {
                     it.copy(
                         isOnlineLoading = false,
                         gameMode = GameMode.ONLINE,
+                        onlineRole = resolvedOnlineRole,
                         localPlayerUid = uid,
                         localPlayerRole = myRole,
                         onlineGameSession = session,
@@ -1748,10 +1766,75 @@ class WaliViewModel(
     }
 
     /**
+     * Rejoint un salon en ligne en tant que spectateur via son code spectateur de 7 caractères ('S' + 6 caractères).
+     * N'écrit jamais dans le document du salon et positionne strictement `onlineRole = OnlineRole.SPECTATOR`
+     * et `localPlayerRole = null`.
+     */
+    fun startSpectateOnlineGame(spectatorCode: String) {
+        audio?.playClick()
+        val repo = onlineRepository ?: run {
+            _uiState.update { it.copy(onlineErrorMessage = "Service en ligne indisponible.") }
+            return
+        }
+        val cleanCode = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+        if (!WaliOnlineCodeGenerator.isValidSpectatorCode(cleanCode)) {
+            _uiState.update {
+                it.copy(onlineErrorMessage = "Le code spectateur doit comporter 7 caractères et commencer par S.")
+            }
+            return
+        }
+        _uiState.update { it.copy(isOnlineLoading = true, onlineErrorMessage = null) }
+
+        viewModelScope.launch {
+            try {
+                val result = repo.joinAsSpectator(cleanCode)
+                val session = result.getOrThrow()
+                val uid = repo.currentUserId
+
+                stopTurnTimer()
+                stopOnlineInactivityMonitoring()
+
+                _uiState.update {
+                    it.copy(
+                        isOnlineLoading = false,
+                        gameMode = GameMode.ONLINE,
+                        onlineRole = com.example.wali.online.OnlineRole.SPECTATOR,
+                        localPlayerUid = uid,
+                        localPlayerRole = null,
+                        onlineGameSession = session,
+                        gameState = session.gameState,
+                        waitingForOpponentCode = null,
+                        selectedPosition = null,
+                        highlightedMoves = emptySet(),
+                        capturablePositions = emptySet(),
+                        canDeclareAbandonment = false,
+                        isOpponentDisconnected = false,
+                        feedbackMessage = if (session.status == OnlineGameStatus.WAITING) {
+                            "Mode spectateur — En attente du second joueur…"
+                        } else {
+                            "Mode spectateur — Observation en direct."
+                        }
+                    )
+                }
+                observeOnlineSession(session.code)
+            } catch (e: Exception) {
+                Log.w("WaliViewModel", "startSpectateOnlineGame warning: ${e.message}")
+                _uiState.update {
+                    it.copy(
+                        isOnlineLoading = false,
+                        onlineErrorMessage = e.message ?: "Impossible de rejoindre ce salon en spectateur"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * Annule la salle d'attente d'une partie créée et repasse en mode local.
      */
     fun cancelOnlineWaiting() {
         audio?.playClick()
+        val isSpectator = _uiState.value.isSpectator
         val code = _uiState.value.waitingForOpponentCode ?: _uiState.value.onlineGameSession?.code
         onlineSessionJob?.cancel()
         onlineSessionJob = null
@@ -1762,7 +1845,7 @@ class WaliViewModel(
         preRematchMessageIds = emptySet()
         chatRateLimiter.reset()
 
-        if (code != null) {
+        if (code != null && !isSpectator) {
             viewModelScope.launch {
                 runCatching { onlineRepository?.leaveGame(code) }
                 runCatching { chatRepository?.clearMessages(code) }
@@ -1773,6 +1856,7 @@ class WaliViewModel(
             it.copy(
                 waitingForOpponentCode = null,
                 onlineGameSession = null,
+                onlineRole = null,
                 gameMode = GameMode.TWO_PLAYERS,
                 localPlayerRole = null,
                 feedbackMessage = null,
@@ -1817,25 +1901,32 @@ class WaliViewModel(
             repo.observeMessages(code).collect { rawMessages ->
                 val isBlocked = _uiState.value.chatState.isOpponentBlocked
                 val myRole = _uiState.value.localPlayerRole
+                val myUid = _uiState.value.localPlayerUid ?: onlineRepository?.currentUserId ?: ""
                 val currentSessionMessages = rawMessages.filter { it.id !in preRematchMessageIds }
                 val filteredMessages = if (isBlocked) {
-                    currentSessionMessages.filter { it.senderRole == myRole || it.type == ChatMessageType.SYSTEM }
+                    currentSessionMessages.filter {
+                        (myUid.isNotBlank() && it.senderUid == myUid) ||
+                                (myRole != null && it.senderRole == myRole) ||
+                                it.type == ChatMessageType.SYSTEM
+                    }
                 } else {
                     currentSessionMessages
                 }
 
                 val wasOpen = _uiState.value.chatState.isOpen
                 val oldMessageIds = _uiState.value.chatState.messages.map { it.id }.toSet()
-                val newIncomingFromOpponent = currentSessionMessages.any {
-                    it.id.isNotBlank() && it.id !in oldMessageIds && it.senderRole != myRole && it.type != ChatMessageType.SYSTEM
+                val newIncomingFromOther = currentSessionMessages.any { msg ->
+                    val isMine = (myUid.isNotBlank() && msg.senderUid == myUid) ||
+                            (myRole != null && msg.senderRole == myRole)
+                    msg.id.isNotBlank() && msg.id !in oldMessageIds && !isMine && msg.type != ChatMessageType.SYSTEM
                 }
 
-                if (newIncomingFromOpponent) {
+                if (newIncomingFromOther) {
                     audio?.playChatMessage()
                 }
 
                 val unread = if (wasOpen) 0 else {
-                    _uiState.value.chatState.unreadCount + (if (newIncomingFromOpponent) 1 else 0)
+                    _uiState.value.chatState.unreadCount + (if (newIncomingFromOther) 1 else 0)
                 }
 
                 _uiState.update { current ->
@@ -1926,6 +2017,7 @@ class WaliViewModel(
 
     /**
      * Envoie un message texte libre avec vérification du limiteur de débit et filtrage de modération.
+     * Autorisé pour les joueurs actifs ET pour les spectateurs (`senderRole == null`, `isSpectator == true`).
      */
     fun sendChatMessage(text: String = _uiState.value.chatState.inputText) {
         val trimmed = text.trim()
@@ -1933,9 +2025,11 @@ class WaliViewModel(
         if (trimmed.length > WaliChatMessage.MAX_TEXT_LENGTH) return
         if (_uiState.value.chatState.isOpponentBlocked) return
 
-        val code = _uiState.value.onlineGameSession?.code ?: return
-        val role = _uiState.value.localPlayerRole ?: return
-        val uid = onlineRepository?.currentUserId ?: ""
+        val state = _uiState.value
+        val code = state.onlineGameSession?.code ?: return
+        val isSpectator = state.isSpectator
+        val role = if (isSpectator) null else (state.localPlayerRole ?: return)
+        val uid = state.localPlayerUid ?: onlineRepository?.currentUserId ?: ""
 
         when (val rateCheck = chatRateLimiter.canSend()) {
             is WaliChatRateLimiter.Result.TooFast -> {
@@ -1979,6 +2073,7 @@ class WaliViewModel(
             val message = WaliChatMessage(
                 senderRole = role,
                 senderUid = uid,
+                isSpectator = isSpectator,
                 text = cleanText,
                 timestamp = System.currentTimeMillis(),
                 type = ChatMessageType.FREE_TEXT
@@ -1989,12 +2084,15 @@ class WaliViewModel(
 
     /**
      * Envoie un message prédéfini rapide en un tap.
+     * Autorisé pour les joueurs actifs ET pour les spectateurs.
      */
     fun sendQuickMessage(quickText: String) {
         if (_uiState.value.chatState.isOpponentBlocked) return
-        val code = _uiState.value.onlineGameSession?.code ?: return
-        val role = _uiState.value.localPlayerRole ?: return
-        val uid = onlineRepository?.currentUserId ?: ""
+        val state = _uiState.value
+        val code = state.onlineGameSession?.code ?: return
+        val isSpectator = state.isSpectator
+        val role = if (isSpectator) null else (state.localPlayerRole ?: return)
+        val uid = state.localPlayerUid ?: onlineRepository?.currentUserId ?: ""
 
         when (val rateCheck = chatRateLimiter.canSend()) {
             is WaliChatRateLimiter.Result.TooFast -> {
@@ -2027,6 +2125,7 @@ class WaliViewModel(
             val message = WaliChatMessage(
                 senderRole = role,
                 senderUid = uid,
+                isSpectator = isSpectator,
                 text = quickText,
                 timestamp = System.currentTimeMillis(),
                 type = ChatMessageType.QUICK_MESSAGE
@@ -2036,12 +2135,17 @@ class WaliViewModel(
     }
 
     /**
-     * Masque localement les messages de l'adversaire pour toute la durée de la partie.
+     * Masque localement les messages des autres participants pour toute la durée de la partie.
      */
     fun blockOpponentInChat() {
         _uiState.update { current ->
             val myRole = current.localPlayerRole
-            val filtered = current.chatState.messages.filter { it.senderRole == myRole || it.type == ChatMessageType.SYSTEM }
+            val myUid = current.localPlayerUid ?: onlineRepository?.currentUserId ?: ""
+            val filtered = current.chatState.messages.filter {
+                (myUid.isNotBlank() && it.senderUid == myUid) ||
+                        (myRole != null && it.senderRole == myRole) ||
+                        it.type == ChatMessageType.SYSTEM
+            }
             current.copy(
                 chatState = current.chatState.copy(
                     isOpponentBlocked = true,
@@ -2132,12 +2236,23 @@ class WaliViewModel(
         val prevGameState = current.gameState
         val currentUid = current.localPlayerUid ?: onlineRepository?.currentUserId
 
-        val myRole = if (session.creatorUid == currentUid) {
-            session.creatorPlayer
-        } else if (session.opponentUid == currentUid) {
-            session.opponentPlayer ?: session.creatorPlayer.opponent
-        } else {
-            current.localPlayerRole ?: session.creatorPlayer
+        val isSpectator = current.onlineRole == com.example.wali.online.OnlineRole.SPECTATOR ||
+                (!currentUid.isNullOrBlank() && !session.isParticipant(currentUid) && current.localPlayerRole == null)
+
+        val resolvedOnlineRole: com.example.wali.online.OnlineRole = when {
+            isSpectator -> com.example.wali.online.OnlineRole.SPECTATOR
+            session.creatorUid == currentUid -> com.example.wali.online.OnlineRole.CREATOR
+            session.opponentUid == currentUid -> com.example.wali.online.OnlineRole.OPPONENT
+            else -> current.onlineRole ?: com.example.wali.online.OnlineRole.CREATOR
+        }
+
+        // Piège 2 corrigé : aucun repli sur session.creatorPlayer pour un spectateur.
+        // Un spectateur garde strictement localPlayerRole = null.
+        val myRole: Player? = when {
+            isSpectator -> null
+            session.creatorUid == currentUid -> session.creatorPlayer
+            session.opponentUid == currentUid -> session.opponentPlayer ?: session.creatorPlayer.opponent
+            else -> current.localPlayerRole ?: session.creatorPlayer
         }
 
         val prevStatus = prevSession?.status
@@ -2150,7 +2265,8 @@ class WaliViewModel(
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
-                        waitingForOpponentCode = session.code,
+                        onlineRole = resolvedOnlineRole,
+                        waitingForOpponentCode = if (isSpectator) null else session.code,
                         localPlayerRole = myRole
                     )
                 }
@@ -2181,6 +2297,7 @@ class WaliViewModel(
                     _uiState.update { state ->
                         state.copy(
                             onlineGameSession = session,
+                            onlineRole = resolvedOnlineRole,
                             gameState = session.gameState,
                             waitingForOpponentCode = null,
                             gameMode = GameMode.ONLINE,
@@ -2189,12 +2306,16 @@ class WaliViewModel(
                             highlightedMoves = emptySet(),
                             capturablePositions = emptySet(),
                             lastMove = null,
-                            feedbackMessage = if (session.gameState.currentPlayer == myRole) {
-                                val label = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
-                                "Revanche lancée ! C'est votre tour ($label)."
-                            } else {
-                                val oppLabel = if (session.gameState.currentPlayer == Player.STICKS) "Bâtonnets" else "Cailloux"
-                                "Revanche lancée ! Tour de l'adversaire ($oppLabel)."
+                            feedbackMessage = when {
+                                isSpectator -> "Nouvelle manche lancée dans ce salon !"
+                                session.gameState.currentPlayer == myRole -> {
+                                    val label = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
+                                    "Revanche lancée ! C'est votre tour ($label)."
+                                }
+                                else -> {
+                                    val oppLabel = if (session.gameState.currentPlayer == Player.STICKS) "Bâtonnets" else "Cailloux"
+                                    "Revanche lancée ! Tour de l'adversaire ($oppLabel)."
+                                }
                             },
                             canDeclareAbandonment = false,
                             isOpponentDisconnected = false,
@@ -2211,11 +2332,13 @@ class WaliViewModel(
                         )
                     }
 
-                    startDurationTracking()
-                    startOnlineInactivityMonitoring()
-                    onTurnTransition()
+                    if (!isSpectator) {
+                        startDurationTracking()
+                        startOnlineInactivityMonitoring()
+                        onTurnTransition()
+                    }
 
-                    if (currentUid != null && currentUid == session.creatorUid) {
+                    if (!isSpectator && currentUid != null && currentUid == session.creatorUid) {
                         viewModelScope.launch {
                             runCatching {
                                 chatRepository?.postSystemMessage(session.code, "--- Nouvelle partie ---")
@@ -2258,6 +2381,7 @@ class WaliViewModel(
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
+                        onlineRole = resolvedOnlineRole,
                         gameState = session.gameState,
                         waitingForOpponentCode = null,
                         gameMode = GameMode.ONLINE,
@@ -2265,20 +2389,26 @@ class WaliViewModel(
                         selectedPosition = null,
                         highlightedMoves = emptySet(),
                         lastMove = onlineMove ?: it.lastMove,
-                        capturablePositions = if (WaliEngine.canCapture(session.gameState) && session.gameState.currentPlayer == myRole) {
+                        capturablePositions = if (!isSpectator && myRole != null && WaliEngine.canCapture(session.gameState) && session.gameState.currentPlayer == myRole) {
                             val opp = session.gameState.currentPlayer.opponent
                             session.gameState.board.filter { entry -> entry.value == opp }.keys
                         } else emptySet(),
-                        feedbackMessage = if (wasWaiting) "Adversaire connecté ! La partie commence." else null,
+                        feedbackMessage = when {
+                            isSpectator && wasWaiting -> "Les deux joueurs sont connectés ! La partie commence."
+                            wasWaiting -> "Adversaire connecté ! La partie commence."
+                            else -> null
+                        },
                         canDeclareAbandonment = false,
                         isOpponentDisconnected = false
                     )
                 }
 
-                startOnlineInactivityMonitoring()
+                if (!isSpectator) {
+                    startOnlineInactivityMonitoring()
 
-                if (wasWaiting || remoteMoved) {
-                    onTurnTransition()
+                    if (wasWaiting || remoteMoved) {
+                        onTurnTransition()
+                    }
                 }
             }
             OnlineGameStatus.ABANDONED -> {
@@ -2290,15 +2420,23 @@ class WaliViewModel(
                 }
 
                 val winner = session.winner ?: myRole
-                val isLocalWinner = (winner == myRole)
-                val reasonText = if (isLocalWinner) "Abandon de l'adversaire" else "Abandon"
+                val isLocalWinner = (myRole != null && winner == myRole)
+                val reasonText = when {
+                    isSpectator -> "Abandon"
+                    isLocalWinner -> "Abandon de l'adversaire"
+                    else -> "Abandon"
+                }
                 val gameOverState = session.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
                     moveHistory = if (prevGameState.phase == Phase.GAME_OVER) {
                         prevGameState.moveHistory
                     } else {
-                        session.gameState.moveHistory + if (isLocalWinner) "Victoire par abandon de l'adversaire !" else "Partie terminée par forfait."
+                        session.gameState.moveHistory + when {
+                            isSpectator -> "Partie terminée par abandon."
+                            isLocalWinner -> "Victoire par abandon de l'adversaire !"
+                            else -> "Partie terminée par forfait."
+                        }
                     }
                 )
                 if (prevGameState.winner == null) {
@@ -2306,21 +2444,30 @@ class WaliViewModel(
                     checkRecordGameOverResult(gameOverState, reasonText)
                 }
                 stopTurnTimer()
-                viewModelScope.launch {
-                    runCatching { storage?.clearSavedGame() }
+                if (!isSpectator) {
+                    viewModelScope.launch {
+                        runCatching { storage?.clearSavedGame() }
+                    }
                 }
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
+                        onlineRole = resolvedOnlineRole,
                         gameState = gameOverState,
                         gameOverReason = reasonText,
-                        feedbackMessage = if (isLocalWinner) "Partie remportée par abandon de l'adversaire !" else "Vous avez déclaré forfait.",
+                        feedbackMessage = when {
+                            isSpectator -> "La partie s'est terminée par abandon."
+                            isLocalWinner -> "Partie remportée par abandon de l'adversaire !"
+                            else -> "Vous avez déclaré forfait."
+                        },
                         canDeclareAbandonment = false,
                         showForfeitConfirmation = false,
                         isOpponentDisconnected = false
                     )
                 }
-                updateRematchCountdownState(session, currentUid)
+                if (!isSpectator) {
+                    updateRematchCountdownState(session, currentUid)
+                }
             }
             OnlineGameStatus.FINISHED -> {
                 stopOnlineInactivityMonitoring()
@@ -2338,17 +2485,21 @@ class WaliViewModel(
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
+                        onlineRole = resolvedOnlineRole,
                         gameState = session.gameState,
                         canDeclareAbandonment = false,
                         isOpponentDisconnected = false
                     )
                 }
-                updateRematchCountdownState(session, currentUid)
+                if (!isSpectator) {
+                    updateRematchCountdownState(session, currentUid)
+                }
             }
         }
     }
 
     private fun updateRematchCountdownState(session: OnlineGameSession, currentUid: String?) {
+        if (_uiState.value.isSpectator) return
         val myUid = currentUid ?: return
         val oppUid = session.getOpponentUid(myUid)
         val onlyMeWaiting = session.rematchRequestedBy.contains(myUid) &&
@@ -2401,34 +2552,39 @@ class WaliViewModel(
     }
 
     private fun handleOpponentLeftDuringRematch() {
+        val wasSpectator = _uiState.value.isSpectator
         stopOnlineInactivityMonitoring()
         stopRematchTimeoutCountdown()
         onlineSessionJob?.cancel()
         onlineSessionJob = null
         chatMessagesJob?.cancel()
         chatMessagesJob = null
+        val msg = if (wasSpectator) "Un joueur a quitté le salon" else "L'adversaire a quitté le salon"
         _uiState.update {
             it.copy(
                 onlineGameSession = null,
+                onlineRole = null,
                 waitingForOpponentCode = null,
                 gameMode = GameMode.TWO_PLAYERS,
                 localPlayerRole = null,
                 canDeclareAbandonment = false,
                 isOpponentDisconnected = false,
                 rematchTimeoutRemainingSeconds = null,
-                rematchStatusMessage = "L'adversaire a quitté le salon",
-                onlineErrorMessage = "L'adversaire a quitté le salon",
+                rematchStatusMessage = msg,
+                onlineErrorMessage = msg,
                 showModeSelectionDialog = true,
-                feedbackMessage = "L'adversaire a quitté le salon"
+                feedbackMessage = msg
             )
         }
     }
 
     /**
      * Demande ou accepte une revanche dans le même salon en ligne après la fin d'une partie.
+     * Un spectateur ne peut pas demander ni accepter de revanche.
      */
     fun requestOnlineRematch() {
         audio?.playClick()
+        if (_uiState.value.isSpectator) return
         val session = _uiState.value.onlineGameSession ?: return
         val repo = onlineRepository ?: return
         val myUid = _uiState.value.localPlayerUid ?: repo.currentUserId
@@ -2468,6 +2624,7 @@ class WaliViewModel(
      */
     fun cancelOnlineRematchRequest() {
         audio?.playClick()
+        if (_uiState.value.isSpectator) return
         stopRematchTimeoutCountdown()
         val session = _uiState.value.onlineGameSession ?: return
         val repo = onlineRepository ?: return
@@ -2486,9 +2643,11 @@ class WaliViewModel(
 
     /**
      * Quitte le salon depuis l'écran de fin de partie en ligne et ramène au menu principal.
+     * Pour un spectateur, n'écrit jamais dans le document du salon.
      */
     fun leaveOnlineSalonAfterGame() {
         audio?.playClick()
+        val isSpectator = _uiState.value.isSpectator
         val session = _uiState.value.onlineGameSession
         val code = session?.code ?: _uiState.value.waitingForOpponentCode
         stopOnlineInactivityMonitoring()
@@ -2499,7 +2658,7 @@ class WaliViewModel(
         chatMessagesJob = null
         preRematchMessageIds = emptySet()
 
-        if (code != null) {
+        if (code != null && !isSpectator) {
             viewModelScope.launch {
                 runCatching { onlineRepository?.leaveGame(code) }
             }
@@ -2508,6 +2667,7 @@ class WaliViewModel(
         _uiState.update {
             it.copy(
                 onlineGameSession = null,
+                onlineRole = null,
                 waitingForOpponentCode = null,
                 gameMode = GameMode.TWO_PLAYERS,
                 localPlayerRole = null,
@@ -2523,9 +2683,10 @@ class WaliViewModel(
 
     /**
      * Envoie l'état du jeu mis à jour à Firestore si la partie est en ligne.
+     * Ne s'exécute jamais pour un spectateur.
      */
     private fun syncOnlineMoveIfNeeded(newGameState: GameState) {
-        if (_uiState.value.gameMode != GameMode.ONLINE) return
+        if (_uiState.value.gameMode != GameMode.ONLINE || _uiState.value.isSpectator) return
         val session = _uiState.value.onlineGameSession ?: return
         viewModelScope.launch {
             try {
@@ -2539,9 +2700,11 @@ class WaliViewModel(
 
     /**
      * Déclare la victoire du joueur local suite à l'inactivité prolongée (abandon) de l'adversaire.
+     * Ne s'exécute jamais pour un spectateur.
      */
     fun declareOpponentAbandoned() {
         audio?.playClick()
+        if (_uiState.value.isSpectator) return
         val session = _uiState.value.onlineGameSession ?: return
         val myRole = _uiState.value.localPlayerRole ?: return
         viewModelScope.launch {
@@ -2565,11 +2728,17 @@ class WaliViewModel(
         } else {
             session.opponentPlayer ?: session.creatorPlayer.opponent
         }
+        val resolvedOnlineRole = if (session.creatorUid == currentUid) {
+            com.example.wali.online.OnlineRole.CREATOR
+        } else {
+            com.example.wali.online.OnlineRole.OPPONENT
+        }
         _uiState.update {
             it.copy(
                 showResumeOnlineDialog = false,
                 pendingResumeOnlineGame = null,
                 gameMode = GameMode.ONLINE,
+                onlineRole = resolvedOnlineRole,
                 onlineGameSession = session,
                 gameState = session.gameState,
                 localPlayerUid = currentUid,
@@ -2602,19 +2771,21 @@ class WaliViewModel(
     }
 
     /**
-     * Quitte la partie en ligne actuelle et la déclare abandonnée si elle était en cours.
+     * Quitte la partie en ligne actuelle et la déclare abandonnée si elle était en cours (pour un joueur).
+     * Pour un spectateur, quitte proprement sans écrire dans Firestore.
      */
     fun leaveOnlineGame() {
         audio?.playClick()
+        val isSpectator = _uiState.value.isSpectator
         val session = _uiState.value.onlineGameSession
         val myRole = _uiState.value.localPlayerRole
-        if (session != null && session.status == OnlineGameStatus.ONGOING && myRole != null) {
+        if (!isSpectator && session != null && session.status == OnlineGameStatus.ONGOING && myRole != null) {
             viewModelScope.launch {
                 runCatching {
                     onlineRepository?.declareAbandonment(session.code, myRole.opponent)
                 }
             }
-        } else if (session != null && (session.status == OnlineGameStatus.FINISHED || session.status == OnlineGameStatus.ABANDONED)) {
+        } else if (!isSpectator && session != null && (session.status == OnlineGameStatus.FINISHED || session.status == OnlineGameStatus.ABANDONED)) {
             viewModelScope.launch {
                 runCatching {
                     onlineRepository?.leaveGame(session.code)
@@ -2625,10 +2796,13 @@ class WaliViewModel(
         stopRematchTimeoutCountdown()
         onlineSessionJob?.cancel()
         onlineSessionJob = null
+        chatMessagesJob?.cancel()
+        chatMessagesJob = null
         preRematchMessageIds = emptySet()
         _uiState.update {
             it.copy(
                 onlineGameSession = null,
+                onlineRole = null,
                 waitingForOpponentCode = null,
                 gameMode = GameMode.TWO_PLAYERS,
                 localPlayerRole = null,
@@ -2643,9 +2817,11 @@ class WaliViewModel(
 
     /**
      * Démarre la surveillance périodique de l'activité du joueur adverse en mode en ligne.
+     * Inactif pour un spectateur.
      */
     fun startOnlineInactivityMonitoring() {
         onlineInactivityJob?.cancel()
+        if (_uiState.value.isSpectator) return
         onlineInactivityJob = viewModelScope.launch {
             while (isActive) {
                 delay(1000L)
@@ -2666,11 +2842,22 @@ class WaliViewModel(
      * Vérifie l'inactivité de l'adversaire distant à partir de lastMoveAt.
      * - Après un court délai (20s) d'inactivité pendant son tour : affiche l'indicateur discret "Connexion instable / Adversaire déconnecté…".
      * - Après 2 minutes (120s) d'inactivité pendant son tour : propose le bouton "Déclarer l'adversaire abandonnataire".
-     * - Si une partie est terminée ou abandonnée, ou si c'est au tour du joueur local, le bouton et l'indicateur ne s'affichent pas.
+     * - Un spectateur ne peut jamais déclarer d'abandon (Piège 3).
      */
     fun checkOnlineInactivity(currentTimeMs: Long = System.currentTimeMillis()) {
         val current = _uiState.value
         if (current.gameMode != GameMode.ONLINE) return
+        if (current.isSpectator) {
+            if (current.isOpponentDisconnected || current.canDeclareAbandonment) {
+                _uiState.update {
+                    it.copy(
+                        isOpponentDisconnected = false,
+                        canDeclareAbandonment = false
+                    )
+                }
+            }
+            return
+        }
         val session = current.onlineGameSession ?: return
 
         if (session.status != OnlineGameStatus.ONGOING || current.gameState.phase == Phase.GAME_OVER) {

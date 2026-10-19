@@ -61,6 +61,7 @@ data class WaliUiState(
     val isSecondaryScreenOpen: Boolean = false,
     val isAdShowing: Boolean = false,
     val onlineGameSession: com.example.wali.online.OnlineGameSession? = null,
+    val onlineRole: com.example.wali.online.OnlineRole? = null,
     val localPlayerRole: Player? = null,
     val localPlayerUid: String? = null,
     val waitingForOpponentCode: String? = null,
@@ -89,10 +90,34 @@ data class WaliUiState(
         get() = gameMode == GameMode.ONLINE
 
     /**
+     * Vrai si l'utilisateur courant observe la partie en ligne en tant que spectateur.
+     * Source unique de vérité basée sur [onlineRole] (ou dérivée de la session si non initialisée).
+     */
+    val isSpectator: Boolean
+        get() {
+            if (!isOnlineGame) return false
+            if (onlineRole != null) return onlineRole == com.example.wali.online.OnlineRole.SPECTATOR
+            val session = onlineGameSession ?: return false
+            val uid = localPlayerUid ?: return false
+            return !session.isParticipant(uid)
+        }
+
+    /**
+     * Code spectateur du salon en ligne courant (7 caractères commençant par 'S').
+     */
+    val onlineSpectatorCode: String?
+        get() = onlineGameSession?.spectatorCode
+
+    val spectatorCode: String
+        get() = onlineGameSession?.spectatorCode.orEmpty()
+
+    /**
      * Vrai si le joueur local a demandé une revanche dans le salon actuel.
+     * Toujours faux pour un spectateur.
      */
     val isRematchRequestedByMe: Boolean
         get() {
+            if (isSpectator) return false
             val session = onlineGameSession ?: return false
             val uid = localPlayerUid ?: return false
             return session.rematchRequestedBy.contains(uid)
@@ -100,9 +125,11 @@ data class WaliUiState(
 
     /**
      * Vrai si l'adversaire a demandé une revanche dans le salon actuel.
+     * Toujours faux pour un spectateur.
      */
     val isRematchRequestedByOpponent: Boolean
         get() {
+            if (isSpectator) return false
             val session = onlineGameSession ?: return false
             val myUid = localPlayerUid ?: return false
             val oppUid = session.getOpponentUid(myUid) ?: return false
@@ -113,7 +140,7 @@ data class WaliUiState(
      * Vrai si seul le joueur local a demandé la revanche et attend la réponse de l'adversaire.
      */
     val isWaitingForRematch: Boolean
-        get() = isOnlineGame && isRematchRequestedByMe && !isRematchRequestedByOpponent
+        get() = isOnlineGame && !isSpectator && isRematchRequestedByMe && !isRematchRequestedByOpponent
 
     /**
      * Nombre de victoires du joueur local dans le salon courant (indexé par uid).
@@ -137,6 +164,30 @@ data class WaliUiState(
         }
 
     /**
+     * Nombre de victoires dans le salon courant du joueur qui occupe actuellement le camp Bâtons (STICKS).
+     * Utilisé notamment par les spectateurs pour afficher le score par camp.
+     */
+    val salonSticksPlayerWins: Int
+        get() {
+            val session = onlineGameSession ?: return 0
+            val sticksUid = session.resolveParticipantUidForRole(Player.STICKS)
+                ?: if (session.creatorPlayer == Player.STICKS) session.creatorUid else session.opponentUid
+            return session.getWinsForUid(sticksUid)
+        }
+
+    /**
+     * Nombre de victoires dans le salon courant du joueur qui occupe actuellement le camp Cailloux (STONES).
+     * Utilisé notamment par les spectateurs pour afficher le score par camp.
+     */
+    val salonStonesPlayerWins: Int
+        get() {
+            val session = onlineGameSession ?: return 0
+            val stonesUid = session.resolveParticipantUidForRole(Player.STONES)
+                ?: if (session.creatorPlayer == Player.STONES) session.creatorUid else session.opponentUid
+            return session.getWinsForUid(stonesUid)
+        }
+
+    /**
      * Nombre de parties jouées dans le salon courant.
      */
     val salonGamesPlayed: Int
@@ -144,26 +195,29 @@ data class WaliUiState(
 
     /**
      * Vrai si une partie est active et que le joueur peut déclarer forfait.
+     * Un spectateur ne peut jamais déclarer forfait.
      */
     val canDeclareForfeit: Boolean
-        get() = gameState.phase != Phase.GAME_OVER &&
+        get() = !isSpectator &&
+                gameState.phase != Phase.GAME_OVER &&
                 gameState.winner == null &&
                 (gameMode != GameMode.ONLINE || onlineGameSession?.status == com.example.wali.online.OnlineGameStatus.ONGOING)
 
     /**
-     * Vrai si c'est le tour de l'adversaire distant en mode en ligne.
+     * Vrai si c'est le tour de l'adversaire distant en mode en ligne (ou si l'utilisateur est spectateur).
      */
     val isOpponentTurnOnline: Boolean
         get() = isOnlineGame &&
                 onlineGameSession?.status == com.example.wali.online.OnlineGameStatus.ONGOING &&
-                gameState.currentPlayer != localPlayerRole &&
+                (isSpectator || (localPlayerRole != null && gameState.currentPlayer != localPlayerRole)) &&
                 gameState.winner == null
 
     /**
-     * Vrai si le minuteur doit être suspendu (dialogues ouverts, arrière-plan, écran secondaire, etc.).
+     * Vrai si le minuteur doit être suspendu (dialogues ouverts, arrière-plan, écran secondaire, spectateur, etc.).
      */
     val isTimerPaused: Boolean
-        get() = isAppInBackground ||
+        get() = isSpectator ||
+                isAppInBackground ||
                 isSecondaryScreenOpen ||
                 isAdShowing ||
                 showPauseMenu ||

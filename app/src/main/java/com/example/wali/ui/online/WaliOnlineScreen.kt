@@ -98,6 +98,7 @@ import com.example.wali.ui.theme.LocalWaliColors
 @Composable
 fun WaliOnlineScreen(
     waitingForOpponentCode: String?,
+    waitingSpectatorCode: String? = null,
     publicWaitingGames: List<PublicGameItem>,
     isLoading: Boolean,
     errorMessage: String?,
@@ -105,6 +106,7 @@ fun WaliOnlineScreen(
     defeatAtTwoPieces: Boolean = false,
     onCreateGame: (isPublic: Boolean, chosenSide: Player) -> Unit,
     onJoinGame: (code: String) -> Unit,
+    onSpectateGame: (spectatorCode: String) -> Unit = {},
     onCancelWaiting: () -> Unit,
     onDismissError: () -> Unit,
     onNavigateBack: () -> Unit,
@@ -206,7 +208,7 @@ fun WaliOnlineScreen(
                 }
             }
 
-            // Onglets de navigation : Créer une partie / Rejoindre une partie
+            // Onglets de navigation : Créer une partie / Rejoindre une partie / Spectateurs
             TabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = colors.surface,
@@ -242,6 +244,18 @@ fun WaliOnlineScreen(
                     },
                     modifier = Modifier.testTag("tab_join_game")
                 )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = {
+                        Text(
+                            text = "Spectateurs",
+                            fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selectedTab == 2) colors.accentGold else colors.textSecondary
+                        )
+                    },
+                    modifier = Modifier.testTag("tab_spectate_game")
+                )
             }
 
             // Contenu de l'onglet actif
@@ -250,22 +264,32 @@ fun WaliOnlineScreen(
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                if (selectedTab == 0) {
-                    CreateGameTabContent(
-                        waitingCode = waitingForOpponentCode,
-                        isLoading = isLoading,
-                        mandatoryAlignment = mandatoryAlignment,
-                        defeatAtTwoPieces = defeatAtTwoPieces,
-                        onCreateGame = onCreateGame,
-                        onCancelWaiting = onCancelWaiting,
-                        context = context
-                    )
-                } else {
-                    JoinGameTabContent(
-                        publicGames = publicWaitingGames,
-                        isLoading = isLoading,
-                        onJoinGame = onJoinGame
-                    )
+                when (selectedTab) {
+                    0 -> {
+                        CreateGameTabContent(
+                            waitingCode = waitingForOpponentCode,
+                            waitingSpectatorCode = waitingSpectatorCode,
+                            isLoading = isLoading,
+                            mandatoryAlignment = mandatoryAlignment,
+                            defeatAtTwoPieces = defeatAtTwoPieces,
+                            onCreateGame = onCreateGame,
+                            onCancelWaiting = onCancelWaiting,
+                            context = context
+                        )
+                    }
+                    1 -> {
+                        JoinGameTabContent(
+                            publicGames = publicWaitingGames,
+                            isLoading = isLoading,
+                            onJoinGame = onJoinGame
+                        )
+                    }
+                    else -> {
+                        SpectateGameTabContent(
+                            isLoading = isLoading,
+                            onSpectateGame = onSpectateGame
+                        )
+                    }
                 }
 
                 // Indicateur de chargement global
@@ -307,6 +331,7 @@ fun WaliOnlineScreen(
 @Composable
 private fun CreateGameTabContent(
     waitingCode: String?,
+    waitingSpectatorCode: String? = null,
     isLoading: Boolean,
     mandatoryAlignment: Boolean = false,
     defeatAtTwoPieces: Boolean = false,
@@ -359,14 +384,14 @@ private fun CreateGameTabContent(
                 )
 
                 Text(
-                    text = "Partagez ce code avec votre adversaire pour qu'il rejoigne la partie :",
+                    text = "Partagez ce code joueur (6 caractères) avec votre adversaire :",
                     style = MaterialTheme.typography.bodyMedium.copy(
                         color = colors.textSecondary
                     ),
                     textAlign = TextAlign.Center
                 )
 
-                // Affichage grand format du code de partie
+                // Affichage grand format du code de partie (joueur)
                 Box(
                     modifier = Modifier
                         .background(colors.background, RoundedCornerShape(12.dp))
@@ -395,13 +420,13 @@ private fun CreateGameTabContent(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Bouton Copier
+                    // Bouton Copier code joueur
                     OutlinedButton(
                         onClick = {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             val clip = ClipData.newPlainText("Code Wali", waitingCode)
                             clipboard.setPrimaryClip(clip)
-                            Toast.makeText(context, "Code copié dans le presse-papiers !", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Code joueur copié dans le presse-papiers !", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier
                             .weight(1f)
@@ -409,7 +434,7 @@ private fun CreateGameTabContent(
                     ) {
                         Icon(
                             imageVector = Icons.Filled.ContentCopy,
-                            contentDescription = null,
+                            contentDescription = "Copier le code joueur",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(18.dp)
                         )
@@ -417,7 +442,7 @@ private fun CreateGameTabContent(
                         Text("Copier", color = colors.textPrimary)
                     }
 
-                    // Bouton Partager (Intent standard)
+                    // Bouton Partager code joueur (Intent standard)
                     Button(
                         onClick = {
                             val sendIntent = Intent().apply {
@@ -441,11 +466,99 @@ private fun CreateGameTabContent(
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Share,
-                            contentDescription = null,
+                            contentDescription = "Partager le code joueur",
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Partager")
+                    }
+                }
+
+                // Affichage et partage du code spectateur dans la salle d'attente
+                if (!waitingSpectatorCode.isNullOrBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(colors.background)
+                            .border(1.dp, colors.accentGold.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                            .testTag("waiting_spectator_code_section"),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Code spectateur (observation uniquement) :",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textSecondary
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+
+                        Text(
+                            text = formatCodeSpaced(waitingSpectatorCode),
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 3.sp,
+                                color = colors.textPrimary
+                            ),
+                            modifier = Modifier.testTag("waiting_spectator_code_display")
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clip = ClipData.newPlainText("Code Spectateur Wali", waitingSpectatorCode)
+                                    clipboard.setPrimaryClip(clip)
+                                    Toast.makeText(context, "Code spectateur copié !", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("btn_copy_spectator_code")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.ContentCopy,
+                                    contentDescription = "Copier le code spectateur",
+                                    tint = colors.textPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Copier", color = colors.textPrimary, fontSize = 12.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    val sendIntent = Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        putExtra(
+                                            Intent.EXTRA_TEXT,
+                                            "Observe notre partie de Wali Songhaï de Tombouctou en direct avec le code spectateur : $waitingSpectatorCode !"
+                                        )
+                                        type = "text/plain"
+                                    }
+                                    val shareIntent = Intent.createChooser(sendIntent, "Partager le code spectateur")
+                                    context.startActivity(shareIntent)
+                                },
+                                modifier = Modifier
+                                    .weight(1.3f)
+                                    .testTag("btn_share_spectator_code")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Share,
+                                    contentDescription = "Partager le code spectateur",
+                                    tint = colors.accentGold,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Partager", color = colors.accentGold, fontSize = 12.sp)
+                            }
+                        }
                     }
                 }
 
@@ -781,6 +894,113 @@ private fun JoinGameTabContent(
                     onJoin = { onJoinGame(game.code) },
                     isLoading = isLoading
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Contenu de l'onglet "Spectateurs" : saisie d'un code spectateur à 7 caractères commençant par 'S'.
+ */
+@Composable
+private fun SpectateGameTabContent(
+    isLoading: Boolean,
+    onSpectateGame: (spectatorCode: String) -> Unit
+) {
+    val colors = LocalWaliColors.current
+    var spectatorCodeInput by remember { mutableStateOf("") }
+    val isValid = WaliOnlineCodeGenerator.isValidSpectatorCode(spectatorCodeInput)
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = colors.surface)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Observer un salon en direct",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
+                        )
+                    )
+
+                    Text(
+                        text = "Entrez le code spectateur à 7 caractères (commençant par S) partagé par l'un des joueurs. Vous verrez le plateau, le tour et le score en temps réel et pourrez écrire dans le chat.",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = colors.textSecondary
+                        )
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = spectatorCodeInput,
+                            onValueChange = { input ->
+                                if (input.length <= WaliOnlineCodeGenerator.SPECTATOR_CODE_LENGTH) {
+                                    spectatorCodeInput = input.uppercase().filter { it.isLetterOrDigit() }
+                                }
+                            },
+                            singleLine = true,
+                            placeholder = { Text("EX: SW7K9M2") },
+                            textStyle = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 2.sp
+                            ),
+                            keyboardOptions = KeyboardOptions(
+                                capitalization = KeyboardCapitalization.Characters,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    if (isValid && !isLoading) {
+                                        onSpectateGame(spectatorCodeInput)
+                                    }
+                                }
+                            ),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = colors.accentGold,
+                                unfocusedBorderColor = colors.surfaceAlt
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("input_spectator_code")
+                        )
+
+                        Button(
+                            onClick = { onSpectateGame(spectatorCodeInput) },
+                            enabled = isValid && !isLoading,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.accentGold,
+                                contentColor = colors.surface
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .height(54.dp)
+                                .testTag("btn_spectate_by_code")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Login,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Observer", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
     }

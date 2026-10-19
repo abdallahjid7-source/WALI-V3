@@ -81,6 +81,21 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.foundation.layout.Arrangement
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 
 /**
  * Écran principal de jeu pour le Wali Songhaï de Tombouctou.
@@ -149,6 +164,14 @@ fun WaliGameScreen(
         }
     }
 
+    // Bouton retour en mode spectateur : quitte immédiatement sans dialogue d'abandon
+    BackHandler(
+        enabled = !isAdActive && uiState.gameMode == GameMode.ONLINE && uiState.isSpectator &&
+            !uiState.showPauseMenu && !uiState.showModeSelectionDialog
+    ) {
+        viewModel.leaveOnlineGame()
+    }
+
     val subtitle = when (uiState.gameMode) {
         GameMode.TWO_PLAYERS -> "Tombouctou • 2 Joueurs Local"
         GameMode.VS_COMPUTER -> {
@@ -161,7 +184,14 @@ fun WaliGameScreen(
         }
         GameMode.ONLINE -> {
             val code = uiState.onlineGameSession?.code ?: uiState.waitingForOpponentCode ?: "..."
-            "En Ligne • Code: $code"
+            val specCode = uiState.spectatorCode
+            if (uiState.isSpectator) {
+                "Spectateur • Code: ${specCode.ifBlank { code }}"
+            } else if (specCode.isNotBlank()) {
+                "En Ligne • Code: $code • Spect: $specCode"
+            } else {
+                "En Ligne • Code: $code"
+            }
         }
     }
 
@@ -386,6 +416,14 @@ fun WaliGameScreen(
                             }
                         }
 
+                        if (uiState.gameMode == GameMode.ONLINE && (uiState.spectatorCode.isNotBlank() || uiState.isSpectator)) {
+                            OnlineInGameSpectatorBar(
+                                spectatorCode = uiState.spectatorCode,
+                                isSpectator = uiState.isSpectator,
+                                onLeaveSpectator = { viewModel.leaveOnlineGame() }
+                            )
+                        }
+
                         // ScoreHeader compact
                         ScoreHeader(
                             gameState = uiState.gameState,
@@ -393,6 +431,7 @@ fun WaliGameScreen(
                             gameMode = uiState.gameMode,
                             humanPlayer = uiState.humanPlayer,
                             localPlayerRole = uiState.localPlayerRole,
+                            isSpectator = uiState.isSpectator,
                             isAiThinking = uiState.isAiThinking,
                             isTimerEnabled = uiState.isTimerEnabled,
                             timerRemainingSeconds = uiState.timerRemainingSeconds,
@@ -401,6 +440,8 @@ fun WaliGameScreen(
                             gameDurationSeconds = uiState.gameDurationSeconds,
                             salonMyWins = uiState.salonMyWins,
                             salonOpponentWins = uiState.salonOpponentWins,
+                            salonSticksPlayerWins = uiState.salonSticksPlayerWins,
+                            salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                             salonGamesPlayed = uiState.salonGamesPlayed,
                             isCompact = true
                         )
@@ -509,6 +550,14 @@ fun WaliGameScreen(
                                 }
                             }
 
+                            if (uiState.gameMode == GameMode.ONLINE && (uiState.spectatorCode.isNotBlank() || uiState.isSpectator)) {
+                                OnlineInGameSpectatorBar(
+                                    spectatorCode = uiState.spectatorCode,
+                                    isSpectator = uiState.isSpectator,
+                                    onLeaveSpectator = { viewModel.leaveOnlineGame() }
+                                )
+                            }
+
                             // En-tête des scores, phase et statut de réflexion IA
                             ScoreHeader(
                                 gameState = uiState.gameState,
@@ -516,6 +565,7 @@ fun WaliGameScreen(
                                 gameMode = uiState.gameMode,
                                 humanPlayer = uiState.humanPlayer,
                                 localPlayerRole = uiState.localPlayerRole,
+                                isSpectator = uiState.isSpectator,
                                 isAiThinking = uiState.isAiThinking,
                                 isTimerEnabled = uiState.isTimerEnabled,
                                 timerRemainingSeconds = uiState.timerRemainingSeconds,
@@ -524,6 +574,8 @@ fun WaliGameScreen(
                                 gameDurationSeconds = uiState.gameDurationSeconds,
                                 salonMyWins = uiState.salonMyWins,
                                 salonOpponentWins = uiState.salonOpponentWins,
+                                salonSticksPlayerWins = uiState.salonSticksPlayerWins,
+                                salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                                 salonGamesPlayed = uiState.salonGamesPlayed,
                                 isCompact = totalHeight < 680.dp
                             )
@@ -627,12 +679,21 @@ fun WaliGameScreen(
                                 }
                             }
 
+                            if (uiState.gameMode == GameMode.ONLINE && (uiState.spectatorCode.isNotBlank() || uiState.isSpectator)) {
+                                OnlineInGameSpectatorBar(
+                                    spectatorCode = uiState.spectatorCode,
+                                    isSpectator = uiState.isSpectator,
+                                    onLeaveSpectator = { viewModel.leaveOnlineGame() }
+                                )
+                            }
+
                             ScoreHeader(
                                 gameState = uiState.gameState,
                                 feedbackMessage = uiState.feedbackMessage,
                                 gameMode = uiState.gameMode,
                                 humanPlayer = uiState.humanPlayer,
                                 localPlayerRole = uiState.localPlayerRole,
+                                isSpectator = uiState.isSpectator,
                                 isAiThinking = uiState.isAiThinking,
                                 isTimerEnabled = uiState.isTimerEnabled,
                                 timerRemainingSeconds = uiState.timerRemainingSeconds,
@@ -641,6 +702,8 @@ fun WaliGameScreen(
                                 gameDurationSeconds = uiState.gameDurationSeconds,
                                 salonMyWins = uiState.salonMyWins,
                                 salonOpponentWins = uiState.salonOpponentWins,
+                                salonSticksPlayerWins = uiState.salonSticksPlayerWins,
+                                salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                                 salonGamesPlayed = uiState.salonGamesPlayed,
                                 isCompact = true
                             )
@@ -675,6 +738,7 @@ fun WaliGameScreen(
                     WaliChatPanel(
                         chatState = uiState.chatState,
                         localPlayerRole = uiState.localPlayerRole,
+                        localPlayerUid = uiState.localPlayerUid,
                         isLandscape = isLandscape,
                         onClose = { viewModel.closeChat() },
                         onSendMessage = { text -> viewModel.sendChatMessage(text) },
@@ -698,11 +762,14 @@ fun WaliGameScreen(
                 gameMode = uiState.gameMode,
                 humanPlayer = uiState.humanPlayer,
                 localPlayerRole = uiState.localPlayerRole,
+                isSpectator = uiState.isSpectator,
                 gameDurationSeconds = uiState.gameDurationSeconds,
                 scoreboardStats = uiState.scoreboardStats,
                 gameOverReason = uiState.gameOverReason,
                 salonMyWins = uiState.salonMyWins,
                 salonOpponentWins = uiState.salonOpponentWins,
+                salonSticksPlayerWins = uiState.salonSticksPlayerWins,
+                salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                 salonGamesPlayed = uiState.salonGamesPlayed,
                 isWaitingForRematch = uiState.isWaitingForRematch,
                 isRematchRequestedByOpponent = uiState.isRematchRequestedByOpponent,
@@ -813,3 +880,147 @@ fun WaliGameScreen(
         }
     }
 }
+
+/**
+ * Bandeau compact affiché en cours de partie en ligne :
+ * - Permet au créateur et à l'adversaire de voir, copier et partager le code spectateur à tout moment.
+ * - Permet aux spectateurs de voir le code du salon observé et de quitter la partie d'un clic sans confirmation.
+ */
+@Composable
+private fun OnlineInGameSpectatorBar(
+    spectatorCode: String,
+    isSpectator: Boolean,
+    onLeaveSpectator: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = LocalWaliColors.current
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.surfaceAlt.copy(alpha = 0.85f))
+            .border(1.dp, colors.accentGold.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .testTag("ingame_spectator_bar"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Visibility,
+                contentDescription = null,
+                tint = colors.accentGold,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = if (spectatorCode.isNotBlank()) {
+                    if (isSpectator) "Mode Spectateur • $spectatorCode" else "Code Spectateur : $spectatorCode"
+                } else {
+                    "Mode Spectateur"
+                },
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = colors.textPrimary
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag("ingame_spectator_code_text")
+            )
+        }
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (spectatorCode.isNotBlank()) {
+                TextButton(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val clip = ClipData.newPlainText("Code Spectateur Wali Songhaï", spectatorCode)
+                        clipboard?.setPrimaryClip(clip)
+                        copied = true
+                    },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier
+                        .height(28.dp)
+                        .testTag("copy_ingame_spectator_code_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = "Copier le code spectateur",
+                        tint = colors.accentGold,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (copied) "Copié" else "Copier",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = colors.accentGold,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 10.sp
+                        )
+                    )
+                }
+
+                TextButton(
+                    onClick = {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                "Observe notre partie de Wali Songhaï en direct avec le code spectateur : $spectatorCode"
+                            )
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Partager le code spectateur"))
+                    },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier
+                        .height(28.dp)
+                        .testTag("share_ingame_spectator_code_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Partager le code spectateur",
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+
+            if (isSpectator) {
+                OutlinedButton(
+                    onClick = onLeaveSpectator,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier
+                        .height(28.dp)
+                        .testTag("spectator_leave_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ExitToApp,
+                        contentDescription = null,
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "Quitter",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = colors.textPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+

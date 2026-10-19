@@ -37,6 +37,19 @@ interface WaliOnlineRepository {
     suspend fun joinGame(code: String): Result<OnlineGameSession>
 
     /**
+     * Rejoint une partie existante en tant que spectateur (lecture seule du plateau, accès au chat)
+     * à partir de son `spectatorCode` (7 caractères commençant par 'S').
+     * Ne modifie ni `status`, ni `opponentUid`, ni `opponentPlayer`, ni `players`, ni `statsByUid`.
+     */
+    suspend fun joinAsSpectator(spectatorCode: String): Result<OnlineGameSession> =
+        Result.failure(UnsupportedOperationException("Mode spectateur non pris en charge par ce repository."))
+
+    /**
+     * Recherche un salon à partir de son `spectatorCode`.
+     */
+    suspend fun findGameBySpectatorCode(spectatorCode: String): OnlineGameSession? = null
+
+    /**
      * Écoute en temps réel les changements d'état du document d'une partie.
      */
     fun observeGame(code: String): Flow<OnlineGameSession?>

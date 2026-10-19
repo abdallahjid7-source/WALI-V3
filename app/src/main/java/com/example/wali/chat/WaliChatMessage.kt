@@ -24,6 +24,7 @@ data class WaliChatMessage(
     val id: String = "",
     val senderRole: Player? = null,
     val senderUid: String = "",
+    val isSpectator: Boolean = false,
     val text: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val type: ChatMessageType = ChatMessageType.FREE_TEXT

@@ -40,6 +40,22 @@ class FakeWaliOnlineRepository(
 ) : WaliOnlineRepository {
 
     val games = mutableMapOf<String, MutableStateFlow<OnlineGameSession?>>()
+    val presetSpectatorCodes = ArrayDeque<String>()
+
+    private fun generateUniqueSpectatorCode(playerCode: String): String {
+        for (attempt in 1..10) {
+            val candidate = if (presetSpectatorCodes.isNotEmpty()) {
+                presetSpectatorCodes.removeFirst()
+            } else {
+                WaliOnlineCodeGenerator.generateSpectatorCode(excludePlayerCode = playerCode)
+            }
+            val alreadyExists = games.values.any { it.value?.spectatorCode.equals(candidate, ignoreCase = true) }
+            if (!alreadyExists) {
+                return candidate
+            }
+        }
+        return WaliOnlineCodeGenerator.generateSpectatorCode(excludePlayerCode = playerCode)
+    }
 
     override suspend fun ensureAuthenticated(): String = currentUserId
 
@@ -50,8 +66,10 @@ class FakeWaliOnlineRepository(
         initialGameState: GameState
     ): Result<OnlineGameSession> {
         val now = System.currentTimeMillis()
+        val spectatorCode = generateUniqueSpectatorCode(code)
         val session = OnlineGameSession(
             code = code,
+            spectatorCode = spectatorCode,
             isPublic = isPublic,
             status = OnlineGameStatus.WAITING,
             creatorUid = currentUserId,
@@ -72,7 +90,15 @@ class FakeWaliOnlineRepository(
     }
 
     override suspend fun joinGame(code: String): Result<OnlineGameSession> {
-        val flow = games[code] ?: return Result.failure(IllegalArgumentException("Partie introuvable"))
+        val normalized = WaliOnlineCodeGenerator.normalizeCode(code)
+        if (WaliOnlineCodeGenerator.isValidSpectatorCode(normalized) ||
+            games.values.any { it.value?.spectatorCode.equals(normalized, ignoreCase = true) }
+        ) {
+            return Result.failure(
+                IllegalArgumentException("Ce code est un code spectateur. Utilisez l'onglet Spectateurs.")
+            )
+        }
+        val flow = games[normalized] ?: return Result.failure(IllegalArgumentException("Partie introuvable"))
         val current = flow.value ?: return Result.failure(IllegalStateException("Partie nulle"))
         val opponentPlayer = current.creatorPlayer.opponent
         val now = System.currentTimeMillis()
@@ -90,6 +116,31 @@ class FakeWaliOnlineRepository(
         )
         flow.value = updated
         return Result.success(updated)
+    }
+
+    override suspend fun joinAsSpectator(spectatorCode: String): Result<OnlineGameSession> {
+        val normalized = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+        if (WaliOnlineCodeGenerator.isValidCode(normalized) || games.containsKey(normalized)) {
+            return Result.failure(
+                IllegalArgumentException("Ce code est un code joueur. Utilisez l'onglet Rejoindre.")
+            )
+        }
+        if (!WaliOnlineCodeGenerator.isValidSpectatorCode(normalized)) {
+            return Result.failure(
+                IllegalArgumentException("Format de code spectateur invalide (7 caractères commençant par S).")
+            )
+        }
+        val session = findGameBySpectatorCode(normalized)
+            ?: return Result.failure(IllegalArgumentException("Aucun salon trouvé pour ce code spectateur."))
+        return Result.success(session)
+    }
+
+    override suspend fun findGameBySpectatorCode(spectatorCode: String): OnlineGameSession? {
+        val normalized = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+        val candidates = games.values
+            .mapNotNull { it.value }
+            .filter { it.spectatorCode.equals(normalized, ignoreCase = true) }
+        return FirestoreWaliOnlineRepository.selectBestSpectatorCandidate(candidates)
     }
 
     override fun observeGame(code: String): Flow<OnlineGameSession?> {
@@ -194,8 +245,8 @@ class FakeWaliOnlineRepository(
             return Result.success(Unit)
         }
 
-        // Point 1 : abandonedBy est l'UID du joueur perdant (winnerPlayer.opponent)
-        val abandonedByUid = current.resolveParticipantUidForRole(winnerPlayer.opponent) ?: callerUid
+        // Vérification 1 : abandonedBy est l'UID du joueur perdant (winnerPlayer.opponent), ou null si non résoluble (jamais callerUid)
+        val abandonedByUid: String? = current.resolveParticipantUidForRole(winnerPlayer.opponent)
         val (updatedStats, newLastScoredIndex) = computeScoredSalonState(current, winnerPlayer)
 
         val updated = current.copy(
@@ -216,11 +267,18 @@ class FakeWaliOnlineRepository(
     }
 
     override suspend fun leaveGame(code: String): Result<Unit> {
+        return leaveGameAsUser(code, currentUserId)
+    }
+
+    fun leaveGameAsUser(code: String, callerUid: String): Result<Unit> {
         val flow = games[code]
-        val current = flow?.value
-        if (current != null && (current.status == OnlineGameStatus.FINISHED || current.status == OnlineGameStatus.ABANDONED)) {
+        val current = flow?.value ?: return Result.success(Unit)
+        if (!current.isParticipant(callerUid)) {
+            return Result.success(Unit)
+        }
+        if (current.status == OnlineGameStatus.FINISHED || current.status == OnlineGameStatus.ABANDONED) {
             flow.value = current.copy(
-                abandonedBy = "LEFT:$currentUserId",
+                abandonedBy = "LEFT:$callerUid",
                 rematchRequestedBy = emptyList(),
                 lastMoveAt = System.currentTimeMillis()
             )
@@ -1209,5 +1267,341 @@ class WaliOnlineTest {
         // Le score du salon dans l'UI affiche immédiatement 1 - 0 dès la fin de la manche 1
         assertEquals(1, uiState.salonMyWins)
         assertEquals(0, uiState.salonOpponentWins)
+    }
+
+    // =========================================================================
+    // VÉRIFICATION 1 & PARTIE F — MODE SPECTATEUR (DEUX CODES PAR SALON)
+    // =========================================================================
+
+    @Test
+    fun verification1_declareAbandonmentWhenLoserRoleUnresolvable_setsAbandonedByToNullNotCallerUid() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+
+        // Salon ONGOING dont opponentUid est absent : resolveParticipantUidForRole(Player.STONES) renvoie null
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = null,
+            opponentPlayer = null
+        )
+
+        fakeRepo.declareAbandonmentAsUser(code, winnerPlayer = Player.STICKS, callerUid = "local_user_42")
+        val updated = flow.value!!
+        assertEquals(OnlineGameStatus.ABANDONED, updated.status)
+        assertEquals(Player.STICKS, updated.winner)
+        // Vérification 1 : abandonedBy reste honnêtement null au lieu de recevoir l'UID du déclarant (vainqueur)
+        assertNull(updated.abandonedBy)
+    }
+
+    @Test
+    fun spectatorCode_createdWithDistinctSevenCharFormatAndRegeneratedOnCollision() = runOnlineTest {
+        // Prépare une collision volontaire sur le code spectateur "S234567"
+        fakeRepo.presetSpectatorCodes.addLast("S234567")
+        fakeRepo.presetSpectatorCodes.addLast("S234567") // collision avec le 1er salon (même s'il est FINISHED)
+        fakeRepo.presetSpectatorCodes.addLast("S89ABCD") // code de repli unique
+
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val firstPlayerCode = viewModel.uiState.value.waitingForOpponentCode!!
+        val firstSpectatorCode = viewModel.uiState.value.spectatorCode
+        assertEquals("S234567", firstSpectatorCode)
+        assertTrue(WaliOnlineCodeGenerator.isValidSpectatorCode(firstSpectatorCode))
+        assertFalse(WaliOnlineCodeGenerator.isValidCode(firstSpectatorCode))
+        assertFalse(firstPlayerCode.equals(firstSpectatorCode, ignoreCase = true))
+
+        // Même si le 1er salon est passé à FINISHED, son spectatorCode ne doit pas être réattribué
+        fakeRepo.games[firstPlayerCode]!!.value = fakeRepo.games[firstPlayerCode]!!.value!!.copy(
+            status = OnlineGameStatus.FINISHED
+        )
+
+        // Création d'un 2e salon : le 1er tirage "S234567" entre en collision -> régénération automatique vers "S89ABCD"
+        val secondCreate = fakeRepo.createGame(
+            code = "ABCDEF",
+            isPublic = true,
+            creatorSide = Player.STONES,
+            initialGameState = WaliEngine.initializeGame()
+        )
+        assertTrue(secondCreate.isSuccess)
+        assertEquals("S89ABCD", secondCreate.getOrNull()?.spectatorCode)
+    }
+
+    @Test
+    fun spectatorSelection_whenCollisionExistsInDatabase_prioritizesOngoingThenMostRecentCreatedAt() {
+        val baseState = WaliEngine.initializeGame()
+        val finishedRecent = OnlineGameSession(
+            code = "FIN999",
+            spectatorCode = "SCOLLID",
+            status = OnlineGameStatus.FINISHED,
+            creatorUid = "u1",
+            creatorPlayer = Player.STICKS,
+            gameState = baseState,
+            createdAt = 5_000L
+        )
+        val ongoingOlder = OnlineGameSession(
+            code = "ONG111",
+            spectatorCode = "SCOLLID",
+            status = OnlineGameStatus.ONGOING,
+            creatorUid = "u2",
+            creatorPlayer = Player.STICKS,
+            gameState = baseState,
+            createdAt = 2_000L
+        )
+        val ongoingNewer = OnlineGameSession(
+            code = "ONG222",
+            spectatorCode = "SCOLLID",
+            status = OnlineGameStatus.ONGOING,
+            creatorUid = "u3",
+            creatorPlayer = Player.STICKS,
+            gameState = baseState,
+            createdAt = 4_000L
+        )
+
+        // 1. Entre un salon FINISHED plus récent et un salon ONGOING plus ancien, ONGOING est prioritaire
+        val chosen1 = FirestoreWaliOnlineRepository.selectBestSpectatorCandidate(
+            listOf(finishedRecent, ongoingOlder)
+        )
+        assertEquals("ONG111", chosen1?.code)
+
+        // 2. Entre deux salons ONGOING, le plus récent (createdAt le plus élevé) est sélectionné
+        val chosen2 = FirestoreWaliOnlineRepository.selectBestSpectatorCandidate(
+            listOf(finishedRecent, ongoingOlder, ongoingNewer)
+        )
+        assertEquals("ONG222", chosen2?.code)
+    }
+
+    @Test
+    fun crossCodeRejection_spectatorCodeInJoinTabAndPlayerCodeInSpectatorTabReturnExplicitErrors() = runOnlineTest {
+        // Crée un salon avec un code joueur et un code spectateur
+        val created = fakeRepo.createGame(
+            code = "PLAY23",
+            isPublic = true,
+            creatorSide = Player.STICKS,
+            initialGameState = WaliEngine.initializeGame()
+        ).getOrThrow()
+        val playerCode = created.code
+        val spectatorCode = created.spectatorCode
+
+        // 1. Saisir un code spectateur dans "Rejoindre une partie" -> refusé avec message explicite
+        viewModel.startJoinOnlineGame(spectatorCode)
+        testScheduler.runCurrent()
+        assertEquals(
+            "Ce code est un code spectateur. Utilisez l'onglet Spectateurs.",
+            viewModel.uiState.value.onlineErrorMessage
+        )
+
+        // 2. Saisir un code joueur dans "Spectateurs" -> refusé avec message explicite
+        viewModel.dismissOnlineError()
+        viewModel.startSpectateOnlineGame(playerCode)
+        testScheduler.runCurrent()
+        assertEquals(
+            "Ce code est un code joueur. Utilisez l'onglet Rejoindre.",
+            viewModel.uiState.value.onlineErrorMessage
+        )
+    }
+
+    @Test
+    fun spectatorJoin_onWaitingAndOngoingSalon_remainsStrictlyReadOnlyAndReceivesRealtimeMoves() = runOnlineTest {
+        // Un créateur ("creator_1") crée un salon en attente
+        val creatorRepo = FakeWaliOnlineRepository("creator_1")
+        val created = creatorRepo.createGame(
+            code = "ROOM42",
+            isPublic = true,
+            creatorSide = Player.STICKS,
+            initialGameState = WaliEngine.initializeGame()
+        ).getOrThrow()
+
+        // Partage la même table de salons avec le repository du spectateur ("spectator_77")
+        val spectatorRepo = FakeWaliOnlineRepository("spectator_77").also {
+            it.games.putAll(creatorRepo.games)
+        }
+        val spectatorStorage = InMemoryWaliGameStorage()
+        val spectatorVm = WaliViewModel(
+            storage = spectatorStorage,
+            onlineRepository = spectatorRepo
+        )
+        spectatorVm.stopTurnTimer()
+
+        // Le spectateur rejoint pendant que le salon est encore WAITING
+        spectatorVm.startSpectateOnlineGame(created.spectatorCode)
+        testScheduler.runCurrent()
+
+        val stateWhileWaiting = spectatorVm.uiState.value
+        assertEquals(GameMode.ONLINE, stateWhileWaiting.gameMode)
+        assertEquals(OnlineRole.SPECTATOR, stateWhileWaiting.onlineRole)
+        assertTrue(stateWhileWaiting.isSpectator)
+        assertNull(stateWhileWaiting.localPlayerRole)
+
+        // Le salon est resté WAITING, opponentUid est toujours null, statsByUid ne contient pas le spectateur
+        val sessionAfterSpectate = creatorRepo.games["ROOM42"]!!.value!!
+        assertEquals(OnlineGameStatus.WAITING, sessionAfterSpectate.status)
+        assertNull(sessionAfterSpectate.opponentUid)
+        assertFalse(sessionAfterSpectate.players.containsKey("spectator_77"))
+        assertFalse(sessionAfterSpectate.statsByUid.containsKey("spectator_77"))
+
+        // L'adversaire réel ("opponent_2") rejoint la partie -> passage en ONGOING
+        val ongoingSession = sessionAfterSpectate.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_2",
+            opponentPlayer = Player.STONES,
+            players = mapOf("creator_1" to "STICKS", "opponent_2" to "STONES"),
+            statsByUid = mapOf("creator_1" to 0, "opponent_2" to 0)
+        )
+        creatorRepo.games["ROOM42"]!!.value = ongoingSession
+        testScheduler.runCurrent()
+
+        assertEquals(OnlineGameStatus.ONGOING, spectatorVm.uiState.value.onlineGameSession?.status)
+        assertNull(spectatorVm.uiState.value.localPlayerRole)
+        assertFalse(spectatorVm.uiState.value.canDeclareForfeit)
+        assertFalse(spectatorVm.uiState.value.canDeclareAbandonment)
+
+        // Le spectateur clique sur le plateau -> aucun pion posé, aucune écriture réseau
+        val clickPos = Position(0, 0)
+        spectatorVm.onCellClicked(clickPos)
+        testScheduler.runCurrent()
+        assertNull(spectatorVm.uiState.value.gameState.board[clickPos])
+        assertNull(creatorRepo.games["ROOM42"]!!.value!!.gameState.board[clickPos])
+
+        // Le joueur STICKS pose un pion en (2, 2) -> le spectateur le voit en temps réel
+        val movePos = Position(2, 2)
+        val afterMoveState = WaliEngine.placePiece(ongoingSession.gameState, movePos).getOrThrow()
+        creatorRepo.updateGameState("ROOM42", afterMoveState)
+        testScheduler.runCurrent()
+
+        assertEquals(Player.STICKS, spectatorVm.uiState.value.gameState.board[movePos])
+        assertEquals(Player.STONES, spectatorVm.uiState.value.gameState.currentPlayer)
+
+        spectatorVm.stopTurnTimer()
+        spectatorVm.stopOnlineInactivityMonitoring()
+    }
+
+    @Test
+    fun spectatorGuards_gameEndRematchInactivityAndLeave_neverPolluteScoreboardOrSalonDocument() = runOnlineTest {
+        val creatorRepo = FakeWaliOnlineRepository("creator_1")
+        val created = creatorRepo.createGame(
+            code = "GUARD9",
+            isPublic = true,
+            creatorSide = Player.STICKS,
+            initialGameState = WaliEngine.initializeGame()
+        ).getOrThrow()
+
+        val t0 = 1_000_000L
+        creatorRepo.games["GUARD9"]!!.value = created.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_2",
+            opponentPlayer = Player.STONES,
+            players = mapOf("creator_1" to "STICKS", "opponent_2" to "STONES"),
+            statsByUid = mapOf("creator_1" to 0, "opponent_2" to 0),
+            lastMoveAt = t0
+        )
+
+        val spectatorRepo = FakeWaliOnlineRepository("spectator_88").also {
+            it.games.putAll(creatorRepo.games)
+        }
+        val spectatorScoreboard = com.example.wali.storage.WaliScoreboardRepository( context = null )
+        val spectatorVm = WaliViewModel(
+            storage = InMemoryWaliGameStorage(),
+            scoreboardRepository = spectatorScoreboard,
+            onlineRepository = spectatorRepo
+        )
+        spectatorVm.stopTurnTimer()
+
+        spectatorVm.startSpectateOnlineGame(created.spectatorCode)
+        testScheduler.runCurrent()
+
+        // 1. Inactivité prolongée (> 3 min) : le spectateur ne voit ni bouton d'abandon ni forfait et ne peut pas déclarer d'abandon
+        spectatorVm.checkOnlineInactivity(t0 + 200_000L)
+        assertFalse(spectatorVm.uiState.value.canDeclareAbandonment)
+        assertFalse(spectatorVm.uiState.value.isOpponentDisconnected)
+        spectatorVm.declareOpponentAbandoned()
+        spectatorVm.declareForfeit()
+        testScheduler.runCurrent()
+        assertEquals(OnlineGameStatus.ONGOING, creatorRepo.games["GUARD9"]!!.value!!.status)
+
+        // 2. La partie se termine par la victoire de STICKS ("creator_1")
+        val finishedGameState = creatorRepo.games["GUARD9"]!!.value!!.gameState.copy(
+            phase = Phase.GAME_OVER,
+            winner = Player.STICKS
+        )
+        creatorRepo.updateGameState("GUARD9", finishedGameState)
+        testScheduler.runCurrent()
+
+        // Le spectateur voit la fin de partie et les scores du salon par camp, mais son ScoreboardRepository personnel reste à 0
+        val specStateAtEnd = spectatorVm.uiState.value
+        assertEquals(Phase.GAME_OVER, specStateAtEnd.gameState.phase)
+        assertEquals(1, specStateAtEnd.salonSticksPlayerWins)
+        assertEquals(0, specStateAtEnd.salonStonesPlayerWins)
+        assertEquals(0, specStateAtEnd.scoreboardStats.totalGames)
+        assertTrue(specStateAtEnd.recentGames.isEmpty())
+
+        // 3. Le spectateur tente de demander/annuler une revanche -> ignoré, rematchRequestedBy reste vide
+        spectatorVm.requestOnlineRematch()
+        testScheduler.runCurrent()
+        assertTrue(creatorRepo.games["GUARD9"]!!.value!!.rematchRequestedBy.isEmpty())
+
+        // 4. Les deux joueurs acceptent la revanche -> le spectateur reste SPECTATOR (localPlayerRole == null) et voit la manche 2
+        creatorRepo.requestRematchAsUser("GUARD9", "creator_1")
+        creatorRepo.requestRematchAsUser("GUARD9", "opponent_2")
+        testScheduler.runCurrent()
+
+        val specStateAtRematch = spectatorVm.uiState.value
+        assertEquals(OnlineRole.SPECTATOR, specStateAtRematch.onlineRole)
+        assertTrue(specStateAtRematch.isSpectator)
+        assertNull(specStateAtRematch.localPlayerRole)
+        assertEquals(2, specStateAtRematch.salonGamesPlayed)
+        assertEquals(Phase.PLACEMENT, specStateAtRematch.gameState.phase)
+
+        // 5. Le spectateur quitte la partie -> le salon ONGOING n'est ni supprimé ni marqué ABANDONED ni LEFT:
+        spectatorVm.leaveOnlineGame()
+        testScheduler.runCurrent()
+
+        val salonAfterSpectatorLeft = creatorRepo.games["GUARD9"]!!.value
+        assertNotNull(salonAfterSpectatorLeft)
+        assertEquals(OnlineGameStatus.ONGOING, salonAfterSpectatorLeft?.status)
+        assertNull(salonAfterSpectatorLeft?.abandonedBy)
+
+        spectatorVm.stopTurnTimer()
+        spectatorVm.stopOnlineInactivityMonitoring()
+    }
+
+    @Test
+    fun spectatorChat_sendsMessageWithIsSpectatorFlagAndNullSenderRole() = runOnlineTest {
+        val creatorRepo = FakeWaliOnlineRepository("creator_1")
+        val created = creatorRepo.createGame(
+            code = "CHAT77",
+            isPublic = true,
+            creatorSide = Player.STICKS,
+            initialGameState = WaliEngine.initializeGame()
+        ).getOrThrow()
+
+        val spectatorRepo = FakeWaliOnlineRepository("spectator_55").also {
+            it.games.putAll(creatorRepo.games)
+        }
+        val fakeChat = com.example.wali.chat.FakeChatRepository()
+        val spectatorVm = WaliViewModel(
+            storage = InMemoryWaliGameStorage(),
+            onlineRepository = spectatorRepo,
+            chatRepository = fakeChat
+        )
+        spectatorVm.stopTurnTimer()
+
+        spectatorVm.startSpectateOnlineGame(created.spectatorCode)
+        testScheduler.runCurrent()
+
+        spectatorVm.sendChatMessage("Belle partie !")
+        testScheduler.runCurrent()
+
+        assertEquals(1, fakeChat.sentMessages.size)
+        val sent = fakeChat.sentMessages.first()
+        assertEquals("Belle partie !", sent.text)
+        assertEquals("spectator_55", sent.senderUid)
+        assertNull(sent.senderRole)
+        assertTrue(sent.isSpectator)
+
+        spectatorVm.stopTurnTimer()
+        spectatorVm.stopOnlineInactivityMonitoring()
     }
 }

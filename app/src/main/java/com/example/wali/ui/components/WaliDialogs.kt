@@ -78,11 +78,14 @@ fun VictoryDialog(
     gameMode: GameMode = GameMode.TWO_PLAYERS,
     humanPlayer: Player = Player.STICKS,
     localPlayerRole: Player? = null,
+    isSpectator: Boolean = false,
     gameDurationSeconds: Long = 0L,
     scoreboardStats: ScoreboardStats? = null,
     gameOverReason: String? = null,
     salonMyWins: Int = 0,
     salonOpponentWins: Int = 0,
+    salonSticksPlayerWins: Int = 0,
+    salonStonesPlayerWins: Int = 0,
     salonGamesPlayed: Int = 1,
     isWaitingForRematch: Boolean = false,
     isRematchRequestedByOpponent: Boolean = false,
@@ -118,8 +121,12 @@ fun VictoryDialog(
     val subtitle = when (gameMode) {
         GameMode.VS_COMPUTER -> if (winner == humanPlayer) "Félicitations, vous avez battu la Machine !" else "L'ordinateur remporte la partie."
         GameMode.ONLINE -> {
-            val myRole = localPlayerRole ?: humanPlayer
-            if (winner == myRole) "Félicitations, vous remportez la partie en ligne !" else "Votre adversaire remporte la partie en ligne."
+            if (isSpectator) {
+                "Les $winnerLabel remportent cette manche en ligne !"
+            } else {
+                val myRole = localPlayerRole ?: humanPlayer
+                if (winner == myRole) "Félicitations, vous remportez la partie en ligne !" else "Votre adversaire remporte la partie en ligne."
+            }
         }
         else -> reason
     }
@@ -228,7 +235,11 @@ fun VictoryDialog(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "Score du salon : $salonMyWins – $salonOpponentWins",
+                            text = if (isSpectator) {
+                                "Score du salon : Bâtons $salonSticksPlayerWins – $salonStonesPlayerWins Cailloux"
+                            } else {
+                                "Score du salon : $salonMyWins – $salonOpponentWins"
+                            },
                             style = MaterialTheme.typography.titleSmall.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = colors.accentGold
@@ -278,68 +289,18 @@ fun VictoryDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 if (gameMode == GameMode.ONLINE) {
-                    if (!rematchStatusMessage.isNullOrBlank()) {
+                    if (isSpectator) {
                         Text(
-                            text = rematchStatusMessage,
+                            text = "En attente de la décision des joueurs pour une éventuelle revanche…",
                             style = MaterialTheme.typography.bodySmall.copy(
-                                color = colors.accentEarth,
-                                fontWeight = FontWeight.SemiBold
+                                color = colors.textSecondary,
+                                fontWeight = FontWeight.Medium
                             ),
                             textAlign = TextAlign.Center,
                             modifier = Modifier
-                                .padding(bottom = 8.dp)
-                                .testTag("rematch_status_message")
+                                .padding(bottom = 12.dp)
+                                .testTag("spectator_rematch_waiting_notice")
                         )
-                    } else if (isRematchRequestedByOpponent && !isWaitingForRematch) {
-                        Text(
-                            text = "Votre adversaire propose une revanche !",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = colors.accentGold,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .padding(bottom = 8.dp)
-                                .testTag("opponent_rematch_offer")
-                        )
-                    }
-
-                    if (isWaitingForRematch) {
-                        val waitText = if (rematchTimeoutRemainingSeconds != null) {
-                            "En attente de l'adversaire… (${rematchTimeoutRemainingSeconds}s)"
-                        } else {
-                            "En attente de l'adversaire…"
-                        }
-                        Text(
-                            text = waitText,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                color = colors.accentGold,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .padding(bottom = 10.dp)
-                                .testTag("waiting_for_rematch_indicator")
-                        )
-
-                        OutlinedButton(
-                            onClick = { onCancelRematch?.invoke() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("btn_cancel_rematch"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(
-                                text = "Annuler la demande",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = colors.accentEarth
-                                )
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
 
                         OutlinedButton(
                             onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
@@ -358,43 +319,124 @@ fun VictoryDialog(
                             )
                         }
                     } else {
-                        Button(
-                            onClick = { (onRequestRematch ?: onNewGameClicked).invoke() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("btn_online_rematch"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = colors.accentEarth,
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
+                        if (!rematchStatusMessage.isNullOrBlank()) {
                             Text(
-                                text = "Revanche",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                text = rematchStatusMessage,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = colors.accentEarth,
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .padding(bottom = 8.dp)
+                                    .testTag("rematch_status_message")
+                            )
+                        } else if (isRematchRequestedByOpponent && !isWaitingForRematch) {
+                            Text(
+                                text = "Votre adversaire propose une revanche !",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = colors.accentGold,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .padding(bottom = 8.dp)
+                                    .testTag("opponent_rematch_offer")
                             )
                         }
 
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        OutlinedButton(
-                            onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("btn_leave_online_salon"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
+                        if (isWaitingForRematch) {
+                            val waitText = if (rematchTimeoutRemainingSeconds != null) {
+                                "En attente de l'adversaire… (${rematchTimeoutRemainingSeconds}s)"
+                            } else {
+                                "En attente de l'adversaire…"
+                            }
                             Text(
-                                text = "Quitter le salon",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = colors.textPrimary
-                                )
+                                text = waitText,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = colors.accentGold,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .padding(bottom = 10.dp)
+                                    .testTag("waiting_for_rematch_indicator")
                             )
+
+                            OutlinedButton(
+                                onClick = { onCancelRematch?.invoke() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("btn_cancel_rematch"),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(
+                                    text = "Annuler la demande",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.accentEarth
+                                    )
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            OutlinedButton(
+                                onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("btn_leave_online_salon"),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(
+                                    text = "Quitter le salon",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
+                                    )
+                                )
+                            }
+                        } else {
+                            Button(
+                                onClick = { (onRequestRematch ?: onNewGameClicked).invoke() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("btn_online_rematch"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = colors.accentEarth,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Revanche",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            OutlinedButton(
+                                onClick = { (onLeaveOnlineSalon ?: onNewGameClicked).invoke() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("btn_leave_online_salon"),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(
+                                    text = "Quitter le salon",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
+                                    )
+                                )
+                            }
                         }
                     }
                 } else {
