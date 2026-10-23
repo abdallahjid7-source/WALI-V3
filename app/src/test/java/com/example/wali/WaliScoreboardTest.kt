@@ -263,4 +263,92 @@ class WaliScoreboardTest {
         // En mode TWO_PLAYERS, l'outcome est COMPLETED (parties amicales partagées)
         assertEquals(1, stats.twoPlayersGames)
     }
+
+    @Test
+    fun winStreak_drawBreaksCurrentStreakWithoutCountingAsLoss() = runTest {
+        // 3 victoires d'affilée -> currentWinStreak = 3, bestWinStreak = 3
+        repeat(3) {
+            scoreboardRepo.recordGameResult(
+                GameResultRecord(
+                    outcome = GameOutcome.WIN,
+                    gameMode = GameMode.ONLINE,
+                    durationSeconds = 60L,
+                    winner = Player.STICKS,
+                    isDoubleWin = false
+                )
+            )
+        }
+
+        var stats = scoreboardRepo.getStats()
+        assertEquals(3, stats.totalWins)
+        assertEquals(0, stats.totalLosses)
+        assertEquals(3, stats.currentWinStreak)
+        assertEquals(3, stats.bestWinStreak)
+
+        // 1 match nul -> casse la série en cours (currentWinStreak = 0), conserve bestWinStreak = 3, et ne compte PAS comme défaite
+        scoreboardRepo.recordGameResult(
+            GameResultRecord(
+                outcome = GameOutcome.DRAW,
+                gameMode = GameMode.ONLINE,
+                durationSeconds = 90L,
+                winner = Player.STICKS,
+                reason = "Match nul — Les deux joueurs ont accepté.",
+                isDoubleWin = false
+            )
+        )
+
+        stats = scoreboardRepo.getStats()
+        assertEquals(3, stats.totalWins)
+        assertEquals(0, stats.totalLosses)
+        assertEquals(0, stats.onlineLosses)
+        assertEquals(4, stats.totalGamesPlayed)
+        assertEquals(0, stats.currentWinStreak)
+        assertEquals(3, stats.bestWinStreak)
+    }
+
+    @Test
+    fun scoreboard_legacyRecordWithoutIsDoubleWin_loadsSafelyWithDefaultFalse() {
+        val legacyJsonArray = """
+            [
+              {
+                "id": "legacy-record-001",
+                "timestampMs": 1700000000000,
+                "outcome": "WIN",
+                "gameMode": "ONLINE",
+                "durationSeconds": 145,
+                "winner": "STICKS",
+                "reason": "Adversaire éliminé"
+              },
+              {
+                "id": "legacy-record-002",
+                "timestampMs": 1700000500000,
+                "outcome": "LOSS",
+                "gameMode": "VS_COMPUTER",
+                "aiDifficulty": "HARD",
+                "durationSeconds": 210,
+                "winner": "STONES",
+                "reason": "Adversaire bloqué"
+              }
+            ]
+        """.trimIndent()
+
+        val loadedRecords = com.example.wali.storage.DataStoreWaliScoreboardRepository.parseRecentGamesJson(legacyJsonArray)
+        assertEquals(2, loadedRecords.size)
+
+        val first = loadedRecords[0]
+        assertEquals("legacy-record-001", first.id)
+        assertEquals(GameOutcome.WIN, first.outcome)
+        assertEquals(GameMode.ONLINE, first.gameMode)
+        assertEquals(145L, first.durationSeconds)
+        assertEquals(Player.STICKS, first.winner)
+        assertEquals("Adversaire éliminé", first.reason)
+        org.junit.Assert.assertFalse(first.isDoubleWin)
+
+        val second = loadedRecords[1]
+        assertEquals("legacy-record-002", second.id)
+        assertEquals(GameOutcome.LOSS, second.outcome)
+        assertEquals(GameMode.VS_COMPUTER, second.gameMode)
+        assertEquals(AiDifficulty.HARD, second.aiDifficulty)
+        org.junit.Assert.assertFalse(second.isDoubleWin)
+    }
 }

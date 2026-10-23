@@ -240,6 +240,21 @@ class DataStoreWaliScoreboardRepository(
         val KEY_RECENT_GAMES_JSON = stringPreferencesKey("scoreboard_recent_games_json")
 
         private const val MAX_RECENT_GAMES = 25
+
+        internal fun parseRecentGamesJson(json: String?): List<GameResultRecord> {
+            if (json.isNullOrBlank()) return emptyList()
+            val list = mutableListOf<GameResultRecord>()
+            try {
+                val array = JSONArray(json)
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    GameResultRecord.fromJson(item)?.let { list.add(it) }
+                }
+            } catch (e: Exception) {
+                Log.w("WaliScoreboardRepo", "Error parsing recent games JSON: ${e.message}")
+            }
+            return list
+        }
     }
 
     override val statsFlow: Flow<ScoreboardStats> = context.waliDataStore.data
@@ -372,8 +387,12 @@ class DataStoreWaliScoreboardRepository(
                         prefs[KEY_TOTAL_LOSSES] = prevTotalLosses + 1
                         prefs[KEY_CURRENT_WIN_STREAK] = 0
                     }
-                    GameOutcome.DRAW, GameOutcome.COMPLETED -> {
-                        // Match nul ou 2 joueurs local : aucun point de victoire ni défaite attribué
+                    GameOutcome.DRAW -> {
+                        // Un match nul casse la série de victoires en cours sans compter comme une défaite
+                        prefs[KEY_CURRENT_WIN_STREAK] = 0
+                    }
+                    GameOutcome.COMPLETED -> {
+                        // 2 joueurs local : aucun point de victoire ni défaite attribué
                     }
                 }
 
@@ -477,21 +496,6 @@ class DataStoreWaliScoreboardRepository(
         }
     }
 
-    private fun parseRecentGamesJson(json: String?): List<GameResultRecord> {
-        if (json.isNullOrBlank()) return emptyList()
-        val list = mutableListOf<GameResultRecord>()
-        try {
-            val array = JSONArray(json)
-            for (i in 0 until array.length()) {
-                val item = array.getJSONObject(i)
-                GameResultRecord.fromJson(item)?.let { list.add(it) }
-            }
-        } catch (e: Exception) {
-            Log.w("WaliScoreboardRepo", "Error parsing recent games JSON: ${e.message}")
-        }
-        return list
-    }
-
     private fun serializeRecentGamesJson(games: List<GameResultRecord>): String {
         val array = JSONArray()
         for (g in games) {
@@ -546,6 +550,9 @@ class InMemoryWaliScoreboardRepository(
             }
         } else if (result.outcome == GameOutcome.LOSS) {
             newLosses++
+            newStreak = 0
+        } else if (result.outcome == GameOutcome.DRAW) {
+            // Un match nul casse la série en cours sans compter comme une défaite
             newStreak = 0
         }
 

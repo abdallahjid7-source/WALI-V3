@@ -32,17 +32,24 @@ service cloud.firestore {
          && resource.data.creatorUid != request.resource.data.opponentUid)
         ||
         // Cas 2 : Action de jeu (gameStateJson), proposition/réponse de match nul (drawOfferedBy, drawOfferTurnCount)
-        // ou abandon par l'un des deux participants enregistrés
+        // ou abandon par l'un des deux participants enregistrés (spectateurs et non-participants exclus).
+        // Pendant qu'une offre de match nul est en attente, les deux participants sont autorisés à écrire
+        // drawOfferedBy et drawOfferTurnCount (notamment l'adversaire qui répond alors que le tour appartient encore au proposant).
         (resource.data.status == 'ongoing'
          && request.resource.data.creatorUid == resource.data.creatorUid
          && request.resource.data.opponentUid == resource.data.opponentUid
-         && (request.auth == null
-             || request.auth.uid == resource.data.creatorUid
+         && request.auth != null
+         && (request.auth.uid == resource.data.creatorUid
              || request.auth.uid == resource.data.opponentUid)
          && (!('drawOfferedBy' in request.resource.data)
              || request.resource.data.drawOfferedBy == null
-             || request.resource.data.drawOfferedBy == resource.data.creatorUid
-             || request.resource.data.drawOfferedBy == resource.data.opponentUid)
+             || (resource.data.get('drawOfferedBy', null) == null
+                 && request.resource.data.drawOfferedBy == request.auth.uid
+                 && (request.resource.data.drawOfferedBy == resource.data.creatorUid
+                     || request.resource.data.drawOfferedBy == resource.data.opponentUid))
+             || (resource.data.get('drawOfferedBy', null) != null
+                 && (request.resource.data.drawOfferedBy == resource.data.creatorUid
+                     || request.resource.data.drawOfferedBy == resource.data.opponentUid)))
          && (!('drawOfferTurnCount' in request.resource.data)
              || request.resource.data.drawOfferTurnCount is int))
         ||

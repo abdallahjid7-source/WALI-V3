@@ -134,11 +134,19 @@ data class GameState(
 
     /**
      * Retourne le nombre de pions vivants restants pour [player].
-     * En phase PLACEMENT, aucune capture n'étant possible, chaque joueur possède encore ses 12 pions.
-     * En phases MOVEMENT et GAME_OVER, retourne [sticksRemaining] ou [stonesRemaining].
+     * En phase PLACEMENT (ou si la partie s'est terminée en GAME_OVER pendant la phase de pose,
+     * avant toute transition vers la phase de déplacement), aucune capture n'étant possible,
+     * chaque joueur possède encore ses 12 pions.
+     * En phases MOVEMENT et GAME_OVER après le début des déplacements, retourne [sticksRemaining] ou [stonesRemaining].
      */
     fun remainingPiecesOf(player: Player): Int {
         if (phase == Phase.PLACEMENT) {
+            return Position.PIECES_PER_PLAYER
+        }
+        if (phase == Phase.GAME_OVER &&
+            moveHistory.any { it.contains(" posé en ") } &&
+            moveHistory.none { it.contains("Début des déplacements") || it.contains("Début anticipé des déplacements") }
+        ) {
             return Position.PIECES_PER_PLAYER
         }
         return when (player) {

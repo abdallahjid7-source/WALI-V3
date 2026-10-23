@@ -507,7 +507,7 @@ class FirestoreWaliOnlineRepository(
                     throw IllegalStateException("Seul un joueur participant peut répondre au match nul.")
                 }
                 if (session.status != OnlineGameStatus.ONGOING) {
-                    return@runTransaction null
+                    throw IllegalStateException("La partie n'est pas en cours.")
                 }
                 val offeredBy = session.drawOfferedBy
                     ?: throw IllegalStateException("Aucune proposition de match nul en attente.")

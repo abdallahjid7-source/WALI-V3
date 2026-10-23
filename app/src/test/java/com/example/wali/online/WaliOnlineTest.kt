@@ -2225,4 +2225,314 @@ class WaliOnlineTest {
         vm.stopTurnTimer()
         vm.stopOnlineInactivityMonitoring()
     }
+
+    @Test
+    fun doubleWin_forfeitDuringPlacementPhase_awards2Points() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+
+        // Simule plusieurs poses en Phase.PLACEMENT (sticksRemaining et stonesRemaining ont diminué à 9 et 10)
+        var stateInPlacement = WaliEngine.initializeGame()
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(0, 0)) // STICKS (11)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(0, 1)) // STONES (11)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(1, 0)) // STICKS (10)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(1, 1)) // STONES (10)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(2, 2)) // STICKS (9)
+        assertEquals(Phase.PLACEMENT, stateInPlacement.phase)
+        assertEquals(9, stateInPlacement.sticksRemaining)
+        assertEquals(10, stateInPlacement.stonesRemaining)
+
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            statsByUid = mapOf("local_user_42" to 0, "opponent_99" to 0),
+            gameState = stateInPlacement
+        )
+        testScheduler.runCurrent()
+
+        // STICKS déclare forfait en pleine phase de pose : aucune capture n'a pu avoir lieu -> +2 points pour STONES
+        viewModel.declareForfeit()
+        testScheduler.runCurrent()
+
+        val session = flow.value!!
+        assertEquals(OnlineGameStatus.ABANDONED, session.status)
+        assertEquals(Player.STONES, session.winner)
+        assertEquals(0, viewModel.uiState.value.gameState.capturesMadeBy(Player.STICKS))
+        assertTrue(viewModel.uiState.value.isDoubleWin)
+        assertEquals(0, session.statsByUid["local_user_42"])
+        assertEquals(2, session.statsByUid["opponent_99"])
+    }
+
+    @Test
+    fun doubleWin_timeoutDuringPlacementPhase_awards2Points() = runOnlineTest {
+        val scoreboard = com.example.wali.storage.InMemoryWaliScoreboardRepository()
+        val vm = WaliViewModel(
+            storage = InMemoryWaliGameStorage(),
+            scoreboardRepository = scoreboard,
+            onlineRepository = fakeRepo
+        )
+        vm.stopTurnTimer()
+
+        vm.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = vm.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+
+        // Plusieurs pions ont été posés en Phase.PLACEMENT (sticksRemaining = 9, stonesRemaining = 10)
+        var stateInPlacement = WaliEngine.initializeGame()
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(0, 0)) // STICKS (11)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(0, 1)) // STONES (11)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(1, 0)) // STICKS (10)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(1, 1)) // STONES (10)
+        stateInPlacement = WaliEngine.placePiece(stateInPlacement, Position(2, 2)) // STICKS (9), tour à STONES
+        assertEquals(Phase.PLACEMENT, stateInPlacement.phase)
+        assertEquals(Player.STONES, stateInPlacement.currentPlayer)
+
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            statsByUid = mapOf("local_user_42" to 0, "opponent_99" to 0),
+            gameState = stateInPlacement
+        )
+        testScheduler.runCurrent()
+
+        // Timeout / abandon de STONES en phase de pose -> +2 points pour STICKS
+        vm.declareOpponentAbandoned()
+        testScheduler.runCurrent()
+
+        val session = flow.value!!
+        assertEquals(OnlineGameStatus.ABANDONED, session.status)
+        assertEquals(Player.STICKS, session.winner)
+        assertEquals(0, vm.uiState.value.gameState.capturesMadeBy(Player.STONES))
+        assertTrue(vm.uiState.value.isDoubleWin)
+        assertEquals(2, session.statsByUid["local_user_42"])
+        assertEquals(0, session.statsByUid["opponent_99"])
+        assertEquals(2, scoreboard.getStats().totalWins)
+
+        vm.stopTurnTimer()
+        vm.stopOnlineInactivityMonitoring()
+    }
+
+    @Test
+    fun doubleWin_blockedAtTransitionToMovement_awards2Points() = runOnlineTest {
+        val scoreboard = com.example.wali.storage.InMemoryWaliScoreboardRepository()
+        val vm = WaliViewModel(
+            storage = InMemoryWaliGameStorage(),
+            scoreboardRepository = scoreboard,
+            onlineRepository = fakeRepo
+        )
+        vm.stopTurnTimer()
+
+        vm.startCreateOnlineGame(isPublic = true, chosenSide = Player.STONES)
+        testScheduler.runCurrent()
+
+        val code = vm.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+
+        // Construit un plateau où 23 pions sont déjà posés (12 STICKS, 11 STONES) et où toutes les
+        // 6 cases vides restantes après la 24e pose (Position(0, 2)) sont sur la ligne 4,
+        // entièrement isolées des pions STICKS par la ligne 3 occupée par STONES,
+        // de sorte que STICKS (premier joueur en MOVEMENT) est immédiatement bloqué dès transitionToMovement.
+        val board = Position.allPositions.associateWith<Position, Player?> { null }.toMutableMap()
+        val sticksPositions = listOf(
+            Position(0, 0), Position(0, 1), Position(0, 3), Position(0, 4),
+            Position(1, 0), Position(1, 2), Position(1, 3), Position(1, 5),
+            Position(2, 1), Position(2, 2), Position(2, 4), Position(2, 5)
+        )
+        val stonesPlacedPositions = listOf(
+            Position(0, 5),
+            Position(1, 1), Position(1, 4),
+            Position(2, 0), Position(2, 3),
+            Position(3, 0), Position(3, 1), Position(3, 2), Position(3, 3), Position(3, 4), Position(3, 5)
+        )
+        sticksPositions.forEach { board[it] = Player.STICKS }
+        stonesPlacedPositions.forEach { board[it] = Player.STONES }
+        // La 12e pose de STONES en Position(0, 2) est entourée de STICKS ((0,1), (0,3), (1,2)),
+        // donc ne forme aucune ligne de 3 pour STONES, et complète les 24 poses.
+        val preLastPlacementState = GameState(
+            board = board,
+            currentPlayer = Player.STONES,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 0,
+            stonesRemaining = 1,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = listOf("STICKS posé en A1")
+        )
+
+        val afterLastPlacement = WaliEngine.placePiece(preLastPlacementState, Position(0, 2))
+        // Vérifie que transitionToMovement a détecté le blocage immédiat de STICKS et donné la victoire à STONES
+        assertEquals(Phase.GAME_OVER, afterLastPlacement.phase)
+        assertEquals(Player.STONES, afterLastPlacement.winner)
+        assertEquals(12, afterLastPlacement.sticksRemaining)
+        assertEquals(12, afterLastPlacement.stonesRemaining)
+        assertEquals(0, afterLastPlacement.capturesMadeBy(Player.STICKS))
+        assertTrue(afterLastPlacement.isDoubleWin(Player.STONES))
+
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            creatorPlayer = Player.STONES,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STICKS,
+            players = mapOf("local_user_42" to "STONES", "opponent_99" to "STICKS"),
+            statsByUid = mapOf("local_user_42" to 0, "opponent_99" to 0),
+            gameState = preLastPlacementState
+        )
+        testScheduler.runCurrent()
+
+        fakeRepo.updateGameState(code, afterLastPlacement)
+        testScheduler.runCurrent()
+
+        val session = flow.value!!
+        assertEquals(OnlineGameStatus.FINISHED, session.status)
+        assertEquals(Player.STONES, session.winner)
+        assertEquals(2, session.statsByUid["local_user_42"])
+        assertEquals(0, session.statsByUid["opponent_99"])
+        assertTrue(vm.uiState.value.isDoubleWin)
+        assertEquals(2, scoreboard.getStats().totalWins)
+
+        vm.stopTurnTimer()
+        vm.stopOnlineInactivityMonitoring()
+    }
+
+    @Test
+    fun draw_proposerCannotAcceptOwnOffer() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+        val movementState = createMovementGameState(currentPlayer = Player.STICKS)
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            gameState = movementState
+        )
+        testScheduler.runCurrent()
+
+        // Le joueur local ("local_user_42") propose un match nul
+        viewModel.proposeDraw()
+        testScheduler.runCurrent()
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+
+        // Le proposant tente d'accepter sa propre offre (via le repository et via le ViewModel)
+        val repoAcceptAttempt = fakeRepo.respondToDraw(code, accept = true, uid = "local_user_42")
+        assertTrue(repoAcceptAttempt.isFailure)
+
+        viewModel.acceptDraw()
+        testScheduler.runCurrent()
+
+        // La partie doit rester ONGOING et l'offre toujours en attente pour l'adversaire
+        assertEquals(OnlineGameStatus.ONGOING, flow.value!!.status)
+        assertEquals(Phase.MOVEMENT, flow.value!!.gameState.phase)
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+    }
+
+    @Test
+    fun draw_proposerCannotRefuseOwnOffer() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+        val movementState = createMovementGameState(currentPlayer = Player.STICKS)
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            gameState = movementState
+        )
+        testScheduler.runCurrent()
+
+        // Le joueur local ("local_user_42") propose un match nul
+        viewModel.proposeDraw()
+        testScheduler.runCurrent()
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+
+        // Le proposant tente de refuser sa propre offre (via le repository et via le ViewModel)
+        val repoRefuseAttempt = fakeRepo.respondToDraw(code, accept = false, uid = "local_user_42")
+        assertTrue(repoRefuseAttempt.isFailure)
+
+        viewModel.refuseDraw()
+        testScheduler.runCurrent()
+
+        // L'offre reste en attente et le tour n'a pas changé
+        assertEquals(OnlineGameStatus.ONGOING, flow.value!!.status)
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+        assertEquals(Player.STICKS, flow.value!!.gameState.currentPlayer)
+    }
+
+    @Test
+    fun draw_spectatorCannotProposeOrRespond() = runOnlineTest {
+        val creatorRepo = FakeWaliOnlineRepository("creator_1")
+        val created = creatorRepo.createGame(
+            code = "DRAWS9",
+            isPublic = true,
+            creatorSide = Player.STICKS,
+            initialGameState = WaliEngine.initializeGame()
+        ).getOrThrow()
+
+        val movementState = createMovementGameState(currentPlayer = Player.STICKS)
+        creatorRepo.games["DRAWS9"]!!.value = created.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_2",
+            opponentPlayer = Player.STONES,
+            players = mapOf("creator_1" to "STICKS", "opponent_2" to "STONES"),
+            statsByUid = mapOf("creator_1" to 0, "opponent_2" to 0),
+            gameState = movementState
+        )
+
+        val spectatorRepo = FakeWaliOnlineRepository("spectator_99").also {
+            it.games.putAll(creatorRepo.games)
+        }
+        val spectatorVm = WaliViewModel(
+            storage = InMemoryWaliGameStorage(),
+            onlineRepository = spectatorRepo
+        )
+        spectatorVm.stopTurnTimer()
+
+        spectatorVm.startSpectateOnlineGame(created.spectatorCode!!)
+        testScheduler.runCurrent()
+
+        assertTrue(spectatorVm.uiState.value.isSpectator)
+        assertFalse(spectatorVm.uiState.value.canProposeDraw)
+        assertFalse(spectatorVm.uiState.value.isDrawOfferedToMe)
+
+        // 1. Le spectateur tente de proposer un match nul (via ViewModel et via Repository) -> rejeté
+        spectatorVm.proposeDraw()
+        testScheduler.runCurrent()
+        assertNull(creatorRepo.games["DRAWS9"]!!.value!!.drawOfferedBy)
+        assertTrue(spectatorRepo.proposeDraw("DRAWS9", "spectator_99").isFailure)
+
+        // 2. Un joueur actif ("creator_1") propose un match nul
+        assertTrue(creatorRepo.proposeDraw("DRAWS9", "creator_1").isSuccess)
+        testScheduler.runCurrent()
+        assertEquals("creator_1", creatorRepo.games["DRAWS9"]!!.value!!.drawOfferedBy)
+
+        // Le spectateur ne voit pas la boîte de dialogue d'acceptation/refus et ses appels sont rejetés
+        assertFalse(spectatorVm.uiState.value.isDrawOfferedToMe)
+        spectatorVm.acceptDraw()
+        spectatorVm.refuseDraw()
+        testScheduler.runCurrent()
+        assertTrue(spectatorRepo.respondToDraw("DRAWS9", accept = true, uid = "spectator_99").isFailure)
+        assertTrue(spectatorRepo.respondToDraw("DRAWS9", accept = false, uid = "spectator_99").isFailure)
+
+        // La proposition reste intacte et la partie continue en ONGOING
+        assertEquals(OnlineGameStatus.ONGOING, creatorRepo.games["DRAWS9"]!!.value!!.status)
+        assertEquals("creator_1", creatorRepo.games["DRAWS9"]!!.value!!.drawOfferedBy)
+
+        spectatorVm.stopTurnTimer()
+        spectatorVm.stopOnlineInactivityMonitoring()
+    }
 }
