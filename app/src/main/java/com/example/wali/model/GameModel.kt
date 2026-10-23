@@ -131,6 +131,44 @@ data class GameState(
      * Indique si un joueur a au moins un pion en attente de pose différée.
      */
     fun hasPendingPlacements(player: Player): Boolean = pendingPlacements(player) > 0
+
+    /**
+     * Retourne le nombre de pions vivants restants pour [player].
+     * En phase PLACEMENT, aucune capture n'étant possible, chaque joueur possède encore ses 12 pions.
+     * En phases MOVEMENT et GAME_OVER, retourne [sticksRemaining] ou [stonesRemaining].
+     */
+    fun remainingPiecesOf(player: Player): Int {
+        if (phase == Phase.PLACEMENT) {
+            return Position.PIECES_PER_PLAYER
+        }
+        return when (player) {
+            Player.STICKS -> sticksRemaining
+            Player.STONES -> stonesRemaining
+        }
+    }
+
+    /**
+     * Retourne le nombre de captures réalisées par [player] depuis le début de la partie :
+     * 12 - remainingPiecesOf(player.opponent).
+     */
+    fun capturesMadeBy(player: Player): Int =
+        (Position.PIECES_PER_PLAYER - remainingPiecesOf(player.opponent)).coerceAtLeast(0)
+
+    /**
+     * Indique si la victoire de [winnerRole] est une victoire double (+2 points),
+     * c'est-à-dire si le perdant n'a capturé aucun pion adverse (capturesMadeBy(loser) == 0).
+     */
+    fun isDoubleWin(winnerRole: Player? = winner): Boolean {
+        val resolvedWinner = winnerRole ?: return false
+        return capturesMadeBy(resolvedWinner.opponent) == 0
+    }
+
+    /**
+     * Retourne le nombre de points attribués au vainqueur [winnerRole] :
+     * 2 points si le perdant a 0 capture, 1 point sinon.
+     */
+    fun pointsForWin(winnerRole: Player): Int =
+        if (capturesMadeBy(winnerRole.opponent) == 0) 2 else 1
 }
 
 /**

@@ -81,7 +81,10 @@ data class WaliUiState(
     val gameOverReason: String? = null,
     val rematchTimeoutRemainingSeconds: Int? = null,
     val rematchStatusMessage: String? = null,
-    val chatState: WaliChatUiState = WaliChatUiState()
+    val chatState: WaliChatUiState = WaliChatUiState(),
+    val localDrawOfferedBy: Player? = null,
+    val localDrawOfferTurnCount: Int = -1,
+    val localLastDrawProposer: Player? = null
 ) {
     /**
      * Vrai si la partie en cours se déroule en ligne via Firestore.
@@ -194,6 +197,91 @@ data class WaliUiState(
         get() = onlineGameSession?.gamesPlayed ?: 1
 
     /**
+     * Vrai si une proposition de match nul est actuellement en attente de réponse.
+     */
+    val isDrawOfferPending: Boolean
+        get() = when (gameMode) {
+            GameMode.TWO_PLAYERS -> localDrawOfferedBy != null
+            GameMode.ONLINE -> onlineGameSession?.drawOfferedBy != null &&
+                    onlineGameSession.status == com.example.wali.online.OnlineGameStatus.ONGOING
+            GameMode.VS_COMPUTER -> false
+        }
+
+    /**
+     * Vrai si une proposition de match nul est adressée au joueur local (ou à l'adversaire sur le même écran en mode 2 joueurs).
+     */
+    val isDrawOfferedToMe: Boolean
+        get() = when (gameMode) {
+            GameMode.TWO_PLAYERS -> localDrawOfferedBy != null &&
+                    gameState.phase == Phase.MOVEMENT &&
+                    gameState.winner == null
+            GameMode.ONLINE -> !isSpectator &&
+                    onlineGameSession?.status == com.example.wali.online.OnlineGameStatus.ONGOING &&
+                    onlineGameSession.drawOfferedBy != null &&
+                    !localPlayerUid.isNullOrBlank() &&
+                    onlineGameSession.drawOfferedBy != localPlayerUid
+            GameMode.VS_COMPUTER -> false
+        }
+
+    /**
+     * Vrai si le joueur local en ligne a proposé un match nul et attend la réponse de son adversaire.
+     */
+    val isWaitingForDrawResponse: Boolean
+        get() = gameMode == GameMode.ONLINE &&
+                !isSpectator &&
+                onlineGameSession?.status == com.example.wali.online.OnlineGameStatus.ONGOING &&
+                onlineGameSession.drawOfferedBy != null &&
+                !localPlayerUid.isNullOrBlank() &&
+                onlineGameSession.drawOfferedBy == localPlayerUid
+
+    /**
+     * Vrai si le joueur dont c'est le tour peut proposer un match nul maintenant :
+     * - Uniquement en Phase.MOVEMENT (jamais en Phase.PLACEMENT)
+     * - Jamais en mode VS_COMPUTER ni en mode spectateur
+     * - Aucune proposition déjà en attente
+     * - C'est bien le tour du joueur local (en ligne)
+     * - Au moins un tour complet s'est écoulé depuis la dernière proposition refusée
+     */
+    val canProposeDraw: Boolean
+        get() {
+            if (isSpectator) return false
+            if (gameMode == GameMode.VS_COMPUTER) return false
+            if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
+            if (isDrawOfferPending) return false
+
+            val currentTurnCount = gameState.moveHistory.size
+            return when (gameMode) {
+                GameMode.TWO_PLAYERS -> {
+                    val inCooldown = localDrawOfferTurnCount >= 0 &&
+                            (localLastDrawProposer == null || localLastDrawProposer == gameState.currentPlayer) &&
+                            currentTurnCount <= localDrawOfferTurnCount
+                    !inCooldown
+                }
+                GameMode.ONLINE -> {
+                    val session = onlineGameSession ?: return false
+                    if (session.status != com.example.wali.online.OnlineGameStatus.ONGOING) return false
+                    val myRole = localPlayerRole ?: session.getPlayerRole(localPlayerUid.orEmpty())
+                    if (myRole == null || gameState.currentPlayer != myRole) return false
+                    val inCooldown = session.drawOfferTurnCount >= 0 && currentTurnCount <= session.drawOfferTurnCount
+                    !inCooldown
+                }
+                GameMode.VS_COMPUTER -> false
+            }
+        }
+
+    /**
+     * Vrai si la partie est terminée sur un match nul accepté par les deux joueurs.
+     */
+    val isDrawGameOver: Boolean
+        get() = gameState.phase == Phase.GAME_OVER && gameState.winner == null
+
+    /**
+     * Vrai si la victoire actuelle vaut 2 points (le perdant n'a capturé aucun pion adverse).
+     */
+    val isDoubleWin: Boolean
+        get() = gameState.isDoubleWin(gameState.winner)
+
+    /**
      * Vrai si une partie est active et que le joueur peut déclarer forfait.
      * Un spectateur ne peut jamais déclarer forfait.
      */
@@ -217,6 +305,7 @@ data class WaliUiState(
      */
     val isTimerPaused: Boolean
         get() = isSpectator ||
+                isDrawOfferPending ||
                 isAppInBackground ||
                 isSecondaryScreenOpen ||
                 isAdShowing ||

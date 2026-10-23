@@ -95,4 +95,14 @@ interface WaliOnlineRepository {
      * Annule sa propre demande de revanche en attente dans le salon [code].
      */
     suspend fun cancelRematchRequest(code: String): Result<Unit> = Result.success(Unit)
+
+    /**
+     * Propose un match nul pendant le tour du joueur [uid] en phase de déplacement.
+     */
+    suspend fun proposeDraw(code: String, uid: String = currentUserId): Result<Unit> = Result.success(Unit)
+
+    /**
+     * Répond à une proposition de match nul en attente ([accept] = true pour accepter, false pour refuser).
+     */
+    suspend fun respondToDraw(code: String, accept: Boolean, uid: String = currentUserId): Result<Unit> = Result.success(Unit)
 }

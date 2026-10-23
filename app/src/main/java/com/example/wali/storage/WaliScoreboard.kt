@@ -30,6 +30,7 @@ import org.json.JSONObject
 enum class GameOutcome {
     WIN,
     LOSS,
+    DRAW,
     COMPLETED // Pour les parties 2 joueurs locales (sans camp attribué au joueur unique)
 }
 
@@ -44,7 +45,8 @@ data class GameResultRecord(
     val aiDifficulty: AiDifficulty? = null,
     val durationSeconds: Long,
     val winner: Player,
-    val reason: String = ""
+    val reason: String = "",
+    val isDoubleWin: Boolean = false
 ) {
     val formattedDuration: String
         get() = formatDuration(durationSeconds)
@@ -71,6 +73,7 @@ data class GameResultRecord(
         obj.put("durationSeconds", durationSeconds)
         obj.put("winner", winner.name)
         obj.put("reason", reason)
+        obj.put("isDoubleWin", isDoubleWin)
         return obj
     }
 
@@ -86,8 +89,9 @@ data class GameResultRecord(
                         AiDifficulty.valueOf(obj.getString("aiDifficulty"))
                     } else null,
                     durationSeconds = obj.optLong("durationSeconds", 0L),
-                    winner = Player.valueOf(obj.getString("winner")),
-                    reason = obj.optString("reason", "")
+                    winner = Player.valueOf(obj.optString("winner", Player.STICKS.name)),
+                    reason = obj.optString("reason", ""),
+                    isDoubleWin = obj.optBoolean("isDoubleWin", false)
                 )
             } catch (e: Exception) {
                 null
@@ -350,9 +354,11 @@ class DataStoreWaliScoreboardRepository(
                     prefs[KEY_LONGEST_GAME_SEC] = result.durationSeconds
                 }
 
+                val winPoints = if (result.isDoubleWin) 2 else 1
+
                 when (result.outcome) {
                     GameOutcome.WIN -> {
-                        prefs[KEY_TOTAL_WINS] = prevTotalWins + 1
+                        prefs[KEY_TOTAL_WINS] = prevTotalWins + winPoints
                         val newStreak = prevCurrentStreak + 1
                         prefs[KEY_CURRENT_WIN_STREAK] = newStreak
                         if (newStreak > prevBestStreak) {
@@ -366,8 +372,8 @@ class DataStoreWaliScoreboardRepository(
                         prefs[KEY_TOTAL_LOSSES] = prevTotalLosses + 1
                         prefs[KEY_CURRENT_WIN_STREAK] = 0
                     }
-                    GameOutcome.COMPLETED -> {
-                        // Pas de camp unique en 2 joueurs local
+                    GameOutcome.DRAW, GameOutcome.COMPLETED -> {
+                        // Match nul ou 2 joueurs local : aucun point de victoire ni défaite attribué
                     }
                 }
 
@@ -379,7 +385,7 @@ class DataStoreWaliScoreboardRepository(
                         prefs[KEY_VS_COMP_DURATION] = vsCompDuration + result.durationSeconds
 
                         if (result.outcome == GameOutcome.WIN) {
-                            prefs[KEY_VS_COMP_WINS] = vsCompWins + 1
+                            prefs[KEY_VS_COMP_WINS] = vsCompWins + winPoints
                         } else if (result.outcome == GameOutcome.LOSS) {
                             prefs[KEY_VS_COMP_LOSSES] = vsCompLosses + 1
                         }
@@ -387,22 +393,22 @@ class DataStoreWaliScoreboardRepository(
                         when (result.aiDifficulty) {
                             AiDifficulty.EASY -> {
                                 if (result.outcome == GameOutcome.WIN) {
-                                    prefs[KEY_EASY_AI_WINS] = (prefs[KEY_EASY_AI_WINS] ?: 0) + 1
-                                } else {
+                                    prefs[KEY_EASY_AI_WINS] = (prefs[KEY_EASY_AI_WINS] ?: 0) + winPoints
+                                } else if (result.outcome == GameOutcome.LOSS) {
                                     prefs[KEY_EASY_AI_LOSSES] = (prefs[KEY_EASY_AI_LOSSES] ?: 0) + 1
                                 }
                             }
                             AiDifficulty.MEDIUM -> {
                                 if (result.outcome == GameOutcome.WIN) {
-                                    prefs[KEY_MEDIUM_AI_WINS] = (prefs[KEY_MEDIUM_AI_WINS] ?: 0) + 1
-                                } else {
+                                    prefs[KEY_MEDIUM_AI_WINS] = (prefs[KEY_MEDIUM_AI_WINS] ?: 0) + winPoints
+                                } else if (result.outcome == GameOutcome.LOSS) {
                                     prefs[KEY_MEDIUM_AI_LOSSES] = (prefs[KEY_MEDIUM_AI_LOSSES] ?: 0) + 1
                                 }
                             }
                             AiDifficulty.HARD, null -> {
                                 if (result.outcome == GameOutcome.WIN) {
-                                    prefs[KEY_HARD_AI_WINS] = (prefs[KEY_HARD_AI_WINS] ?: 0) + 1
-                                } else {
+                                    prefs[KEY_HARD_AI_WINS] = (prefs[KEY_HARD_AI_WINS] ?: 0) + winPoints
+                                } else if (result.outcome == GameOutcome.LOSS) {
                                     prefs[KEY_HARD_AI_LOSSES] = (prefs[KEY_HARD_AI_LOSSES] ?: 0) + 1
                                 }
                             }
@@ -415,7 +421,7 @@ class DataStoreWaliScoreboardRepository(
                         prefs[KEY_ONLINE_DURATION] = onlineDuration + result.durationSeconds
 
                         if (result.outcome == GameOutcome.WIN) {
-                            prefs[KEY_ONLINE_WINS] = onlineWins + 1
+                            prefs[KEY_ONLINE_WINS] = onlineWins + winPoints
                         } else if (result.outcome == GameOutcome.LOSS) {
                             prefs[KEY_ONLINE_LOSSES] = onlineLosses + 1
                         }
@@ -529,9 +535,10 @@ class InMemoryWaliScoreboardRepository(
         var newStreak = prevStreak
         var newBestStreak = prevBestStreak
         var newFastest = prevFastest
+        val winPoints = if (result.isDoubleWin) 2 else 1
 
         if (result.outcome == GameOutcome.WIN) {
-            newWins++
+            newWins += winPoints
             newStreak++
             if (newStreak > newBestStreak) newBestStreak = newStreak
             if (newFastest == null || result.durationSeconds < newFastest) {
@@ -554,13 +561,16 @@ class InMemoryWaliScoreboardRepository(
         if (result.gameMode == GameMode.VS_COMPUTER) {
             when (result.aiDifficulty) {
                 AiDifficulty.EASY -> {
-                    if (result.outcome == GameOutcome.WIN) easyWins++ else easyLosses++
+                    if (result.outcome == GameOutcome.WIN) easyWins += winPoints
+                    else if (result.outcome == GameOutcome.LOSS) easyLosses++
                 }
                 AiDifficulty.MEDIUM -> {
-                    if (result.outcome == GameOutcome.WIN) medWins++ else medLosses++
+                    if (result.outcome == GameOutcome.WIN) medWins += winPoints
+                    else if (result.outcome == GameOutcome.LOSS) medLosses++
                 }
                 AiDifficulty.HARD, null -> {
-                    if (result.outcome == GameOutcome.WIN) hardWins++ else hardLosses++
+                    if (result.outcome == GameOutcome.WIN) hardWins += winPoints
+                    else if (result.outcome == GameOutcome.LOSS) hardLosses++
                 }
             }
         }
@@ -574,7 +584,7 @@ class InMemoryWaliScoreboardRepository(
             longestGameSeconds = newLongest,
             currentWinStreak = newStreak,
             bestWinStreak = newBestStreak,
-            vsComputerWins = if (result.gameMode == GameMode.VS_COMPUTER && result.outcome == GameOutcome.WIN) currentStats.vsComputerWins + 1 else currentStats.vsComputerWins,
+            vsComputerWins = if (result.gameMode == GameMode.VS_COMPUTER && result.outcome == GameOutcome.WIN) currentStats.vsComputerWins + winPoints else currentStats.vsComputerWins,
             vsComputerLosses = if (result.gameMode == GameMode.VS_COMPUTER && result.outcome == GameOutcome.LOSS) currentStats.vsComputerLosses + 1 else currentStats.vsComputerLosses,
             vsComputerDurationSeconds = if (result.gameMode == GameMode.VS_COMPUTER) currentStats.vsComputerDurationSeconds + result.durationSeconds else currentStats.vsComputerDurationSeconds,
             easyAiWins = easyWins,
@@ -583,7 +593,7 @@ class InMemoryWaliScoreboardRepository(
             mediumAiLosses = medLosses,
             hardAiWins = hardWins,
             hardAiLosses = hardLosses,
-            onlineWins = if (result.gameMode == GameMode.ONLINE && result.outcome == GameOutcome.WIN) currentStats.onlineWins + 1 else currentStats.onlineWins,
+            onlineWins = if (result.gameMode == GameMode.ONLINE && result.outcome == GameOutcome.WIN) currentStats.onlineWins + winPoints else currentStats.onlineWins,
             onlineLosses = if (result.gameMode == GameMode.ONLINE && result.outcome == GameOutcome.LOSS) currentStats.onlineLosses + 1 else currentStats.onlineLosses,
             onlineDurationSeconds = if (result.gameMode == GameMode.ONLINE) currentStats.onlineDurationSeconds + result.durationSeconds else currentStats.onlineDurationSeconds,
             twoPlayersGames = if (result.gameMode == GameMode.TWO_PLAYERS) currentStats.twoPlayersGames + 1 else currentStats.twoPlayersGames,

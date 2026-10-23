@@ -467,8 +467,8 @@ class WaliViewModel(
     fun onCellClicked(position: Position) {
         val state = _uiState.value
 
-        // Si la partie est terminée ou si c'est le tour de l'ordinateur, les clics sont bloqués
-        if (state.gameState.phase == Phase.GAME_OVER || state.isAiTurn || state.isAiThinking) {
+        // Si la partie est terminée, si une proposition de match nul est en attente, ou si c'est le tour de l'ordinateur, les clics sont bloqués
+        if (state.gameState.phase == Phase.GAME_OVER || state.isDrawOfferPending || state.isAiTurn || state.isAiThinking) {
             return
         }
 
@@ -754,39 +754,54 @@ class WaliViewModel(
         val current = _uiState.value
         if (current.isSpectator) return
         if (current.isGameResultRecorded) return
-        val winner = state.winner ?: return
+        if (state.phase != Phase.GAME_OVER && state.winner == null) return
 
         _uiState.update { it.copy(isGameResultRecorded = true) }
 
         val mode = current.gameMode
         val human = current.humanPlayer
         val localRole = current.localPlayerRole ?: human
-
-        val outcome = when (mode) {
-            GameMode.VS_COMPUTER -> if (winner == human) GameOutcome.WIN else GameOutcome.LOSS
-            GameMode.ONLINE -> if (winner == localRole) GameOutcome.WIN else GameOutcome.LOSS
-            GameMode.TWO_PLAYERS -> GameOutcome.COMPLETED
-        }
-
-        val loser = winner.opponent
-        val loserPieces = state.piecesOnBoard(loser)
-        val defaultReason = when {
-            loserPieces == 0 -> "Adversaire éliminé"
-            state.ruleOptions.defeatAtTwoPieces && !state.hasPendingPlacements(loser) && loserPieces == 2 -> "Réduit à deux pions"
-            else -> "Adversaire bloqué"
-        }
-        val reason = customReason ?: defaultReason
-
         val durationSeconds = maxOf(1L, current.gameDurationSeconds)
 
-        val record = GameResultRecord(
-            outcome = outcome,
-            gameMode = mode,
-            aiDifficulty = if (mode == GameMode.VS_COMPUTER) current.aiDifficulty else null,
-            durationSeconds = durationSeconds,
-            winner = winner,
-            reason = reason
-        )
+        val winner = state.winner
+        val record = if (winner == null) {
+            val drawReason = customReason ?: "Match nul — Les deux joueurs ont accepté."
+            GameResultRecord(
+                outcome = GameOutcome.DRAW,
+                gameMode = mode,
+                aiDifficulty = if (mode == GameMode.VS_COMPUTER) current.aiDifficulty else null,
+                durationSeconds = durationSeconds,
+                winner = localRole,
+                reason = drawReason,
+                isDoubleWin = false
+            )
+        } else {
+            val outcome = when (mode) {
+                GameMode.VS_COMPUTER -> if (winner == human) GameOutcome.WIN else GameOutcome.LOSS
+                GameMode.ONLINE -> if (winner == localRole) GameOutcome.WIN else GameOutcome.LOSS
+                GameMode.TWO_PLAYERS -> GameOutcome.COMPLETED
+            }
+
+            val loser = winner.opponent
+            val loserPieces = state.piecesOnBoard(loser)
+            val defaultReason = when {
+                loserPieces == 0 -> "Adversaire éliminé"
+                state.ruleOptions.defeatAtTwoPieces && !state.hasPendingPlacements(loser) && loserPieces == 2 -> "Réduit à deux pions"
+                else -> "Adversaire bloqué"
+            }
+            val reason = customReason ?: defaultReason
+            val isDouble = state.isDoubleWin(winner)
+
+            GameResultRecord(
+                outcome = outcome,
+                gameMode = mode,
+                aiDifficulty = if (mode == GameMode.VS_COMPUTER) current.aiDifficulty else null,
+                durationSeconds = durationSeconds,
+                winner = winner,
+                reason = reason,
+                isDoubleWin = isDouble
+            )
+        }
 
         viewModelScope.launch {
             runCatching {
@@ -1124,7 +1139,10 @@ class WaliViewModel(
             canDeclareAbandonment = false,
             isOpponentDisconnected = false,
             gameDurationSeconds = 0L,
-            isGameResultRecorded = false
+            isGameResultRecorded = false,
+            localDrawOfferedBy = null,
+            localDrawOfferTurnCount = -1,
+            localLastDrawProposer = null
         )
 
         startDurationTracking()
@@ -1185,6 +1203,9 @@ class WaliViewModel(
                 showResetConfirmation = false,
                 showForfeitConfirmation = false,
                 gameOverReason = null,
+                localDrawOfferedBy = null,
+                localDrawOfferTurnCount = -1,
+                localLastDrawProposer = null,
                 showModeSelectionDialog = true
             )
         }
@@ -1244,6 +1265,8 @@ class WaliViewModel(
                 val gameOverState = current.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
+                    sticksRemaining = current.gameState.remainingPiecesOf(Player.STICKS),
+                    stonesRemaining = current.gameState.remainingPiecesOf(Player.STONES),
                     moveHistory = current.gameState.moveHistory + "Abandon de $myRole. Victoire de $winner !"
                 )
                 checkPlayEndGameAudio(gameOverState)
@@ -1255,6 +1278,7 @@ class WaliViewModel(
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
                         showPauseMenu = false,
+                        localDrawOfferedBy = null,
                         feedbackMessage = "Vous avez déclaré forfait. Victoire de l'adversaire."
                     )
                 }
@@ -1274,6 +1298,8 @@ class WaliViewModel(
                 val gameOverState = current.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
+                    sticksRemaining = current.gameState.remainingPiecesOf(Player.STICKS),
+                    stonesRemaining = current.gameState.remainingPiecesOf(Player.STONES),
                     moveHistory = current.gameState.moveHistory + "Partie abandonnée. Victoire de $winner !"
                 )
                 checkPlayEndGameAudio(gameOverState)
@@ -1285,6 +1311,7 @@ class WaliViewModel(
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
                         showPauseMenu = false,
+                        localDrawOfferedBy = null,
                         feedbackMessage = "Vous avez déclaré forfait."
                     )
                 }
@@ -1295,6 +1322,8 @@ class WaliViewModel(
                 val gameOverState = current.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
+                    sticksRemaining = current.gameState.remainingPiecesOf(Player.STICKS),
+                    stonesRemaining = current.gameState.remainingPiecesOf(Player.STONES),
                     moveHistory = current.gameState.moveHistory + "Abandon de $forfeiter. Victoire de $winner !"
                 )
                 checkPlayEndGameAudio(gameOverState)
@@ -1306,12 +1335,166 @@ class WaliViewModel(
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
                         showPauseMenu = false,
+                        localDrawOfferedBy = null,
                         feedbackMessage = "Forfait déclaré par $forfeiter."
                     )
                 }
             }
         }
     }
+
+    // =========================================================================
+    // PROPOSITION ET RÉPONSE DE MATCH NUL (PARTIE G1)
+    // =========================================================================
+
+    /**
+     * Propose un match nul pendant le tour du joueur courant en phase de déplacement.
+     * - Mode TWO_PLAYERS : ouvre immédiatement la boîte de dialogue bloquante pour l'adversaire.
+     * - Mode ONLINE : enregistre la proposition dans Firestore et publie le message système dans le chat.
+     * - Mode VS_COMPUTER : indisponible (l'IA ne peut pas accepter de match nul).
+     */
+    fun proposeDraw() {
+        val current = _uiState.value
+        if (!current.canProposeDraw) return
+        audio?.playClick()
+
+        when (current.gameMode) {
+            GameMode.VS_COMPUTER -> return
+            GameMode.TWO_PLAYERS -> {
+                val proposer = current.gameState.currentPlayer
+                val turnCount = current.gameState.moveHistory.size
+                _uiState.update {
+                    it.copy(
+                        localDrawOfferedBy = proposer,
+                        localDrawOfferTurnCount = turnCount,
+                        localLastDrawProposer = proposer,
+                        selectedPosition = null,
+                        highlightedMoves = emptySet(),
+                        feedbackMessage = "Votre adversaire propose un match nul. Accepter ou Refuser ?"
+                    )
+                }
+            }
+            GameMode.ONLINE -> {
+                val session = current.onlineGameSession ?: return
+                val repo = onlineRepository ?: return
+                val myUid = current.localPlayerUid ?: repo.currentUserId
+                val myRole = current.localPlayerRole ?: session.getPlayerRole(myUid) ?: return
+                val campName = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
+                val sysText = "$campName propose un match nul"
+
+                viewModelScope.launch {
+                    val result = repo.proposeDraw(session.code, myUid)
+                    result.onSuccess {
+                        runCatching {
+                            chatRepository?.postSystemMessage(session.code, sysText)
+                        }
+                    }.onFailure { err ->
+                        _uiState.update {
+                            it.copy(feedbackMessage = err.message ?: "Impossible de proposer un match nul.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Répond à une proposition de match nul en attente ([accept] = true pour accepter, false pour refuser).
+     */
+    fun respondToDraw(accept: Boolean) {
+        val current = _uiState.value
+        if (current.isSpectator) return
+        audio?.playClick()
+
+        when (current.gameMode) {
+            GameMode.VS_COMPUTER -> return
+            GameMode.TWO_PLAYERS -> {
+                val offeredBy = current.localDrawOfferedBy ?: return
+                if (accept) {
+                    stopTurnTimer()
+                    aiTurnJob?.cancel()
+                    viewModelScope.launch {
+                        runCatching { storage?.clearSavedGame() }
+                    }
+                    val drawReason = "Match nul — Les deux joueurs ont accepté."
+                    val endedState = current.gameState.copy(
+                        phase = Phase.GAME_OVER,
+                        winner = null,
+                        pendingCaptures = 0,
+                        moveHistory = current.gameState.moveHistory + drawReason
+                    )
+                    checkRecordGameOverResult(endedState, drawReason)
+                    _uiState.update {
+                        it.copy(
+                            gameState = endedState,
+                            localDrawOfferedBy = null,
+                            gameOverReason = drawReason,
+                            selectedPosition = null,
+                            highlightedMoves = emptySet(),
+                            capturablePositions = emptySet(),
+                            feedbackMessage = drawReason
+                        )
+                    }
+                } else {
+                    val refuser = offeredBy.opponent
+                    val baseState = current.gameState.copy(pendingCaptures = 0)
+                    val nextState = if (baseState.currentPlayer != refuser) {
+                        WaliEngine.switchPlayer(baseState)
+                    } else {
+                        baseState
+                    }
+                    _uiState.update {
+                        it.copy(
+                            gameState = nextState,
+                            localDrawOfferedBy = null,
+                            selectedPosition = null,
+                            highlightedMoves = emptySet(),
+                            capturablePositions = emptySet(),
+                            feedbackMessage = "Match nul refusé — la partie continue."
+                        )
+                    }
+                    autoSaveGame(_uiState.value)
+                    onTurnTransition()
+                }
+            }
+            GameMode.ONLINE -> {
+                val session = current.onlineGameSession ?: return
+                val repo = onlineRepository ?: return
+                val myUid = current.localPlayerUid ?: repo.currentUserId
+                if (session.drawOfferedBy == null || session.drawOfferedBy == myUid) return
+                val myRole = current.localPlayerRole ?: session.getPlayerRole(myUid)
+                val campName = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
+                val sysText = if (accept) {
+                    "Match nul accepté par les deux joueurs"
+                } else {
+                    "$campName a refusé le match nul — la partie continue"
+                }
+
+                viewModelScope.launch {
+                    val result = repo.respondToDraw(session.code, accept, myUid)
+                    result.onSuccess {
+                        runCatching {
+                            chatRepository?.postSystemMessage(session.code, sysText)
+                        }
+                    }.onFailure { err ->
+                        _uiState.update {
+                            it.copy(feedbackMessage = err.message ?: "Impossible de répondre au match nul.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Accepte la proposition de match nul en attente.
+     */
+    fun acceptDraw() = respondToDraw(true)
+
+    /**
+     * Refuse la proposition de match nul en attente.
+     */
+    fun refuseDraw() = respondToDraw(false)
 
     /**
      * Ouvre le menu de pause (overlay).
@@ -1716,6 +1899,12 @@ class WaliViewModel(
             return
         }
         val cleanCode = code.trim().uppercase()
+        if (WaliOnlineCodeGenerator.isValidSpectatorCode(cleanCode)) {
+            _uiState.update {
+                it.copy(onlineErrorMessage = "Ce code est un code spectateur. Utilisez l'onglet Spectateurs.")
+            }
+            return
+        }
         if (cleanCode.length != 6) {
             _uiState.update { it.copy(onlineErrorMessage = "Le code doit comporter exactement 6 caractères.") }
             return
@@ -1777,6 +1966,12 @@ class WaliViewModel(
             return
         }
         val cleanCode = WaliOnlineCodeGenerator.normalizeCode(spectatorCode)
+        if (WaliOnlineCodeGenerator.isValidCode(cleanCode)) {
+            _uiState.update {
+                it.copy(onlineErrorMessage = "Ce code est un code joueur. Utilisez l'onglet Rejoindre.")
+            }
+            return
+        }
         if (!WaliOnlineCodeGenerator.isValidSpectatorCode(cleanCode)) {
             _uiState.update {
                 it.copy(onlineErrorMessage = "Le code spectateur doit comporter 7 caractères et commencer par S.")
@@ -2321,6 +2516,9 @@ class WaliViewModel(
                             isOpponentDisconnected = false,
                             showForfeitConfirmation = false,
                             gameOverReason = null,
+                            localDrawOfferedBy = null,
+                            localDrawOfferTurnCount = -1,
+                            localLastDrawProposer = null,
                             gameDurationSeconds = 0L,
                             isGameResultRecorded = false,
                             rematchTimeoutRemainingSeconds = null,
@@ -2349,11 +2547,13 @@ class WaliViewModel(
                 }
 
                 val remoteMoved = prevGameState != session.gameState
+                val drawJustOffered = session.drawOfferedBy != null && prevSession?.drawOfferedBy == null
+                val drawJustRefused = session.drawOfferedBy == null && prevSession?.drawOfferedBy != null
                 var onlineMove: PieceMove? = null
 
                 if (wasWaiting) {
                     audio?.playClick()
-                } else if (remoteMoved) {
+                } else if (remoteMoved && !drawJustRefused) {
                     val oldPieces = prevGameState.piecesOnBoard(Player.STICKS) + prevGameState.piecesOnBoard(Player.STONES)
                     val newPieces = session.gameState.piecesOnBoard(Player.STICKS) + session.gameState.piecesOnBoard(Player.STONES)
                     val oldPlaced = (12 - prevGameState.sticksRemaining) + (12 - prevGameState.stonesRemaining)
@@ -2396,6 +2596,10 @@ class WaliViewModel(
                         feedbackMessage = when {
                             isSpectator && wasWaiting -> "Les deux joueurs sont connectés ! La partie commence."
                             wasWaiting -> "Adversaire connecté ! La partie commence."
+                            drawJustOffered && isSpectator -> "Match nul proposé — en attente de réponse…"
+                            drawJustOffered && session.drawOfferedBy == currentUid -> "Proposition de match nul envoyée à l'adversaire…"
+                            drawJustOffered -> "Votre adversaire propose un match nul. Accepter ou Refuser ?"
+                            drawJustRefused -> "Match nul refusé — la partie continue."
                             else -> null
                         },
                         canDeclareAbandonment = false,
@@ -2406,7 +2610,7 @@ class WaliViewModel(
                 if (!isSpectator) {
                     startOnlineInactivityMonitoring()
 
-                    if (wasWaiting || remoteMoved) {
+                    if (wasWaiting || remoteMoved || drawJustRefused) {
                         onTurnTransition()
                     }
                 }
@@ -2429,6 +2633,8 @@ class WaliViewModel(
                 val gameOverState = session.gameState.copy(
                     winner = winner,
                     phase = Phase.GAME_OVER,
+                    sticksRemaining = session.gameState.remainingPiecesOf(Player.STICKS),
+                    stonesRemaining = session.gameState.remainingPiecesOf(Player.STONES),
                     moveHistory = if (prevGameState.phase == Phase.GAME_OVER) {
                         prevGameState.moveHistory
                     } else {
@@ -2439,7 +2645,7 @@ class WaliViewModel(
                         }
                     }
                 )
-                if (prevGameState.winner == null) {
+                if (prevGameState.winner == null && prevGameState.phase != Phase.GAME_OVER) {
                     checkPlayEndGameAudio(gameOverState)
                     checkRecordGameOverResult(gameOverState, reasonText)
                 }
@@ -2477,16 +2683,30 @@ class WaliViewModel(
                     return
                 }
 
-                if (session.gameState.winner != null && prevGameState.winner == null) {
-                    checkPlayEndGameAudio(session.gameState)
-                    checkRecordGameOverResult(session.gameState)
+                val isDrawEnd = session.winner == null && session.gameState.winner == null
+                val finalGameState = if (session.gameState.phase == Phase.GAME_OVER) {
+                    session.gameState
+                } else {
+                    session.gameState.copy(
+                        phase = Phase.GAME_OVER,
+                        winner = session.winner
+                    )
+                }
+
+                if (finalGameState.winner != null && prevGameState.winner == null) {
+                    checkPlayEndGameAudio(finalGameState)
+                    checkRecordGameOverResult(finalGameState)
+                } else if (isDrawEnd && prevGameState.phase != Phase.GAME_OVER) {
+                    checkRecordGameOverResult(finalGameState, "Match nul — Les deux joueurs ont accepté.")
                 }
                 stopTurnTimer()
                 _uiState.update {
                     it.copy(
                         onlineGameSession = session,
                         onlineRole = resolvedOnlineRole,
-                        gameState = session.gameState,
+                        gameState = finalGameState,
+                        gameOverReason = if (isDrawEnd) "Match nul — Les deux joueurs ont accepté." else it.gameOverReason,
+                        feedbackMessage = if (isDrawEnd) "Match nul — Les deux joueurs ont accepté." else it.feedbackMessage,
                         canDeclareAbandonment = false,
                         isOpponentDisconnected = false
                     )

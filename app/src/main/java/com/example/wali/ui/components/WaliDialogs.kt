@@ -82,6 +82,7 @@ fun VictoryDialog(
     gameDurationSeconds: Long = 0L,
     scoreboardStats: ScoreboardStats? = null,
     gameOverReason: String? = null,
+    isDoubleWin: Boolean = gameState.isDoubleWin(gameState.winner),
     salonMyWins: Int = 0,
     salonOpponentWins: Int = 0,
     salonSticksPlayerWins: Int = 0,
@@ -98,29 +99,34 @@ fun VictoryDialog(
     onNewGameClicked: () -> Unit
 ) {
     val colors = LocalWaliColors.current
-    val winner = gameState.winner ?: return
-    val winnerLabel = if (winner == Player.STICKS) "BÂTONNETS" else "CAILLOUX"
-    val loser = winner.opponent
+    val winner = gameState.winner
+    val isDraw = winner == null && gameState.phase == com.example.wali.model.Phase.GAME_OVER
+    if (winner == null && !isDraw) return
 
-    val loserPieces = gameState.piecesOnBoard(loser)
-    val isAbandon = gameOverReason == "Abandon" ||
+    val winnerLabel = if (winner == Player.STICKS) "BÂTONNETS" else "CAILLOUX"
+    val loser = winner?.opponent
+
+    val loserPieces = if (loser != null) gameState.piecesOnBoard(loser) else 0
+    val isAbandon = !isDraw && (gameOverReason == "Abandon" ||
             gameOverReason == "Abandon de l'adversaire" ||
             gameState.moveHistory.lastOrNull()?.contains("abandon", ignoreCase = true) == true ||
-            gameState.moveHistory.lastOrNull()?.contains("forfait", ignoreCase = true) == true
-    val isReducedToTwo = gameOverReason == "Réduit à deux pions" ||
+            gameState.moveHistory.lastOrNull()?.contains("forfait", ignoreCase = true) == true)
+    val isReducedToTwo = !isDraw && loser != null && (gameOverReason == "Réduit à deux pions" ||
             (gameState.ruleOptions.defeatAtTwoPieces && !gameState.hasPendingPlacements(loser) && loserPieces == 2) ||
-            gameState.moveHistory.lastOrNull()?.contains("réduit à deux pions", ignoreCase = true) == true
+            gameState.moveHistory.lastOrNull()?.contains("réduit à deux pions", ignoreCase = true) == true)
 
     val reason = when {
+        isDraw -> "Match nul — Les deux joueurs ont accepté."
         isAbandon -> "Abandon"
         loserPieces == 0 -> "Adversaire éliminé (tous les pions ont été capturés)"
         isReducedToTwo -> "Réduit à deux pions"
         else -> "Adversaire bloqué (aucun déplacement orthogonal possible)"
     }
 
-    val subtitle = when (gameMode) {
-        GameMode.VS_COMPUTER -> if (winner == humanPlayer) "Félicitations, vous avez battu la Machine !" else "L'ordinateur remporte la partie."
-        GameMode.ONLINE -> {
+    val subtitle = when {
+        isDraw -> "Aucun point de victoire n'est attribué."
+        gameMode == GameMode.VS_COMPUTER -> if (winner == humanPlayer) "Félicitations, vous avez battu la Machine !" else "L'ordinateur remporte la partie."
+        gameMode == GameMode.ONLINE -> {
             if (isSpectator) {
                 "Les $winnerLabel remportent cette manche en ligne !"
             } else {
@@ -172,7 +178,7 @@ fun VictoryDialog(
                     .padding(horizontal = 20.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Trophée avec animation de surgissement et aura dorée pulsante
+                // Trophée ou poignée de main avec animation de surgissement et aura dorée pulsante
                 Box(
                     modifier = Modifier
                         .size(64.dp)
@@ -185,19 +191,58 @@ fun VictoryDialog(
                         .border(2.dp, colors.accentGold, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(text = "🏆", fontSize = 32.sp)
+                    Text(text = if (isDraw) "🤝" else "🏆", fontSize = 32.sp)
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "Victoire des $winnerLabel !",
+                    text = if (isDraw) {
+                        "Match nul — Les deux joueurs ont accepté."
+                    } else {
+                        "Victoire des $winnerLabel !"
+                    },
                     style = MaterialTheme.typography.headlineSmall.copy(
                         fontWeight = FontWeight.Bold,
                         color = colors.textPrimary
                     ),
                     textAlign = TextAlign.Center
                 )
+
+                if (!isDraw) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(colors.accentGold.copy(alpha = 0.18f))
+                            .border(1.dp, colors.accentGold, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                            .testTag("victory_points_badge")
+                    ) {
+                        Text(
+                            text = if (isDoubleWin) "+2 — Victoire écrasante !" else "+1 — Victoire !",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accentGold
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (isDoubleWin) {
+                            "Victoire ! (+2 points — victoire écrasante !)"
+                        } else {
+                            "Victoire ! (+1 point)"
+                        },
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary
+                        ),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.testTag("victory_points_detail")
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -210,7 +255,7 @@ fun VictoryDialog(
                     textAlign = TextAlign.Center
                 )
 
-                if (gameMode == GameMode.VS_COMPUTER || isAbandon || (gameMode == GameMode.ONLINE && isReducedToTwo)) {
+                if (!isDraw && (gameMode == GameMode.VS_COMPUTER || isAbandon || (gameMode == GameMode.ONLINE && isReducedToTwo))) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = if (isAbandon) "Raison : Abandon" else reason,
@@ -609,6 +654,62 @@ fun ForfeitConfirmDialog(
                 Text(
                     text = "Annuler",
                     color = colors.textSecondary
+                )
+            }
+        }
+    )
+}
+
+/**
+ * Boîte de dialogue bloquante affichée à l'adversaire lorsqu'un match nul est proposé.
+ */
+@Composable
+fun DrawProposalDialog(
+    onAccept: () -> Unit,
+    onRefuse: () -> Unit
+) {
+    val colors = LocalWaliColors.current
+
+    AlertDialog(
+        onDismissRequest = { /* Boîte de dialogue bloquante : l'adversaire doit Accepter ou Refuser */ },
+        modifier = Modifier.testTag("draw_proposal_dialog"),
+        shape = RoundedCornerShape(16.dp),
+        containerColor = colors.surface,
+        title = {
+            Text(
+                text = "Proposition de match nul",
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = colors.textPrimary
+                )
+            )
+        },
+        text = {
+            Text(
+                text = "Votre adversaire propose un match nul. Accepter ou Refuser ?",
+                style = MaterialTheme.typography.bodyMedium.copy(color = colors.textSecondary)
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onAccept,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.accentEarth,
+                    contentColor = Color.White
+                ),
+                modifier = Modifier.testTag("btn_accept_draw")
+            ) {
+                Text("Accepter")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onRefuse,
+                modifier = Modifier.testTag("btn_refuse_draw")
+            ) {
+                Text(
+                    text = "Refuser",
+                    color = colors.textPrimary
                 )
             }
         }

@@ -72,7 +72,16 @@ data class OnlineGameSession(
      * - lastScoredGameIndex == gamesPlayed  ->  la manche en cours a déjà été comptabilisée
      * - lastScoredGameIndex <  gamesPlayed  ->  la manche en cours n'a pas encore été comptabilisée
      */
-    val lastScoredGameIndex: Int = 0
+    val lastScoredGameIndex: Int = 0,
+    /**
+     * UID du joueur qui propose actuellement un match nul (null si aucune proposition en attente).
+     */
+    val drawOfferedBy: String? = null,
+    /**
+     * Numéro du tour (moveHistory.size) au moment de la dernière proposition de match nul,
+     * permettant d'imposer l'attente d'au moins un tour complet avant de pouvoir reproposer après un refus.
+     */
+    val drawOfferTurnCount: Int = -1
 ) {
     /**
      * Retourne le rôle en ligne ([OnlineRole]) de [uid] dans cette session.

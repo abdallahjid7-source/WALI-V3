@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import com.example.wali.ai.AiDifficulty
 import com.example.wali.model.GameMode
@@ -203,21 +204,22 @@ class WaliRulesAndNavigationTest {
         }
 
         // L'onglet Spectateurs existe à côté de Créer et Rejoindre
-        composeTestRule.onNodeWithTag("online_tab_spectator").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("online_tab_spectator").performClick()
+        composeTestRule.onNodeWithTag("tab_spectate_game").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_spectate_game").performClick()
         composeTestRule.waitForIdle()
 
-        composeTestRule.onNodeWithTag("online_spectator_code_input").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("online_spectator_join_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("input_spectator_code").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("btn_spectate_by_code").assertIsDisplayed()
 
-        // Passage en salle d'attente : les deux codes (joueur et spectateur) sont affichés avec leurs boutons copier/partager
+        // Retour sur l'onglet Créer et passage en salle d'attente : les deux codes (joueur et spectateur) sont affichés avec leurs boutons copier/partager
+        composeTestRule.onNodeWithTag("tab_create_game").performClick()
         waitingCodeState.value = "PL2345"
         composeTestRule.waitForIdle()
 
-        composeTestRule.onNodeWithTag("waiting_code_text").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("waiting_spectator_code_text").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("copy_spectator_code_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("share_spectator_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("waiting_code_display").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("waiting_spectator_code_display").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("btn_copy_spectator_code").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("btn_share_spectator_code").performScrollTo().assertIsDisplayed()
     }
 }
 

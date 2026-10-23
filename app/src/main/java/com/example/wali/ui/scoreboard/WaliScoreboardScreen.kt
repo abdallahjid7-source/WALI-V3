@@ -860,9 +860,18 @@ private fun GameResultItemCard(
     val lossRed = Color(0xFFC62828)
 
     val (badgeBg, badgeText, badgeLabel) = when (record.outcome) {
-        GameOutcome.WIN -> Triple(winGreen.copy(alpha = 0.15f), winGreen, "Victoire")
+        GameOutcome.WIN -> Triple(
+            winGreen.copy(alpha = 0.15f),
+            winGreen,
+            if (record.isDoubleWin) "Victoire (+2)" else "Victoire (+1)"
+        )
         GameOutcome.LOSS -> Triple(lossRed.copy(alpha = 0.15f), lossRed, "Défaite")
-        GameOutcome.COMPLETED -> Triple(colors.accentGold.copy(alpha = 0.2f), colors.accentGold, "Terminée")
+        GameOutcome.DRAW -> Triple(colors.accentGold.copy(alpha = 0.2f), colors.accentGold, "Match nul")
+        GameOutcome.COMPLETED -> Triple(
+            colors.accentGold.copy(alpha = 0.2f),
+            colors.accentGold,
+            if (record.isDoubleWin) "Terminée (+2)" else "Terminée"
+        )
     }
 
     val modeLabel = when (record.gameMode) {
@@ -927,8 +936,13 @@ private fun GameResultItemCard(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 val reasonText = if (record.reason.isNotBlank()) " • ${record.reason}" else ""
+                val summaryLine = if (record.outcome == GameOutcome.DRAW) {
+                    "Résultat : Match nul$reasonText"
+                } else {
+                    "Vainqueur : $winnerLabel$reasonText"
+                }
                 Text(
-                    text = "Vainqueur : $winnerLabel$reasonText",
+                    text = summaryLine,
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = colors.textSecondary,
                         fontSize = 11.sp

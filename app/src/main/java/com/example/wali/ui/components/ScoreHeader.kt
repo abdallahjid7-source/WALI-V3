@@ -65,6 +65,9 @@ fun ScoreHeader(
     salonSticksPlayerWins: Int = 0,
     salonStonesPlayerWins: Int = 0,
     salonGamesPlayed: Int = 1,
+    canProposeDraw: Boolean = false,
+    isWaitingForDrawResponse: Boolean = false,
+    onProposeDraw: (() -> Unit)? = null,
     isCompact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -349,6 +352,39 @@ fun ScoreHeader(
                     )
                 }
             }
+        }
+
+        if (canProposeDraw && onProposeDraw != null) {
+            Spacer(modifier = Modifier.height(if (isCompact) 4.dp else 6.dp))
+            androidx.compose.material3.OutlinedButton(
+                onClick = onProposeDraw,
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 12.dp,
+                    vertical = if (isCompact) 2.dp else 4.dp
+                ),
+                modifier = Modifier
+                    .height(if (isCompact) 32.dp else 36.dp)
+                    .testTag("btn_propose_draw")
+            ) {
+                Text(
+                    text = "Proposer match nul",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = waliColors.accentGold
+                    )
+                )
+            }
+        } else if (isWaitingForDrawResponse) {
+            Spacer(modifier = Modifier.height(if (isCompact) 4.dp else 6.dp))
+            Text(
+                text = "Proposition de match nul en attente…",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    color = waliColors.accentGold
+                ),
+                modifier = Modifier.testTag("waiting_for_draw_indicator")
+            )
         }
 
         // --- MESSAGE DE FEEDBACK (ERREUR OU AVERTISSEMENT) ---

@@ -665,6 +665,31 @@ object WaliEngine {
         }
     }
 
+    /**
+     * Retourne le nombre de pions vivants restants pour [player] dans [state].
+     */
+    fun remainingPiecesOf(state: GameState, player: Player): Int =
+        state.remainingPiecesOf(player)
+
+    /**
+     * Retourne le nombre de captures réalisées par [player] dans [state] :
+     * 12 - remainingPiecesOf(player.opponent).
+     */
+    fun capturesMadeBy(state: GameState, player: Player): Int =
+        state.capturesMadeBy(player)
+
+    /**
+     * Indique si la victoire de [winner] dans [state] vaut double (+2 points).
+     */
+    fun isDoubleWin(state: GameState, winner: Player? = state.winner): Boolean =
+        state.isDoubleWin(winner)
+
+    /**
+     * Retourne le nombre de points attribués au vainqueur [winner] dans [state] (2 si le perdant a 0 capture, 1 sinon).
+     */
+    fun pointsForWin(state: GameState, winner: Player): Int =
+        state.pointsForWin(winner)
+
     // --- Fonctions utilitaires internes ---
 
     /**

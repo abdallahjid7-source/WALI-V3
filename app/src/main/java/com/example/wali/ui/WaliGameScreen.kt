@@ -62,6 +62,7 @@ import com.example.wali.ads.WaliAdManager
 import com.example.wali.model.GameMode
 import com.example.wali.model.Phase
 import com.example.wali.online.OnlineGameStatus
+import com.example.wali.ui.components.DrawProposalDialog
 import com.example.wali.ui.components.ForfeitConfirmDialog
 import com.example.wali.ui.components.ModeSelectionDialog
 import com.example.wali.ui.components.PauseMenuOverlay
@@ -443,6 +444,9 @@ fun WaliGameScreen(
                             salonSticksPlayerWins = uiState.salonSticksPlayerWins,
                             salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                             salonGamesPlayed = uiState.salonGamesPlayed,
+                            canProposeDraw = uiState.canProposeDraw,
+                            isWaitingForDrawResponse = uiState.isWaitingForDrawResponse,
+                            onProposeDraw = { viewModel.proposeDraw() },
                             isCompact = true
                         )
 
@@ -577,6 +581,9 @@ fun WaliGameScreen(
                                 salonSticksPlayerWins = uiState.salonSticksPlayerWins,
                                 salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                                 salonGamesPlayed = uiState.salonGamesPlayed,
+                                canProposeDraw = uiState.canProposeDraw,
+                                isWaitingForDrawResponse = uiState.isWaitingForDrawResponse,
+                                onProposeDraw = { viewModel.proposeDraw() },
                                 isCompact = totalHeight < 680.dp
                             )
                         }
@@ -705,6 +712,9 @@ fun WaliGameScreen(
                                 salonSticksPlayerWins = uiState.salonSticksPlayerWins,
                                 salonStonesPlayerWins = uiState.salonStonesPlayerWins,
                                 salonGamesPlayed = uiState.salonGamesPlayed,
+                                canProposeDraw = uiState.canProposeDraw,
+                                isWaitingForDrawResponse = uiState.isWaitingForDrawResponse,
+                                onProposeDraw = { viewModel.proposeDraw() },
                                 isCompact = true
                             )
 
@@ -752,10 +762,12 @@ fun WaliGameScreen(
             }
         }
 
-        // --- DIALOGUES & ANIMATION DE VICTOIRE ---
-        if (!isAdActive && uiState.gameState.phase == Phase.GAME_OVER && uiState.gameState.winner != null) {
-            // Animation spectaculaire de confettis et feux de joie en arrière-plan plein écran
-            VictoryCelebrationOverlay()
+        // --- DIALOGUES & ANIMATION DE VICTOIRE / MATCH NUL ---
+        if (!isAdActive && uiState.gameState.phase == Phase.GAME_OVER && (uiState.gameState.winner != null || uiState.isDrawGameOver)) {
+            if (uiState.gameState.winner != null) {
+                // Animation spectaculaire de confettis et feux de joie en arrière-plan plein écran
+                VictoryCelebrationOverlay()
+            }
 
             VictoryDialog(
                 gameState = uiState.gameState,
@@ -766,6 +778,7 @@ fun WaliGameScreen(
                 gameDurationSeconds = uiState.gameDurationSeconds,
                 scoreboardStats = uiState.scoreboardStats,
                 gameOverReason = uiState.gameOverReason,
+                isDoubleWin = uiState.isDoubleWin,
                 salonMyWins = uiState.salonMyWins,
                 salonOpponentWins = uiState.salonOpponentWins,
                 salonSticksPlayerWins = uiState.salonSticksPlayerWins,
@@ -789,6 +802,13 @@ fun WaliGameScreen(
                         viewModel.onGameOverContinue()
                     }
                 }
+            )
+        }
+
+        if (!isAdActive && uiState.isDrawOfferedToMe) {
+            DrawProposalDialog(
+                onAccept = { viewModel.acceptDraw() },
+                onRefuse = { viewModel.refuseDraw() }
             )
         }
 

@@ -44,6 +44,8 @@ class FirestoreWaliOnlineRepository(
         const val FIELD_GAMES_PLAYED = "gamesPlayed"
         const val FIELD_STATS_BY_UID = "statsByUid"
         const val FIELD_LAST_SCORED_GAME_INDEX = "lastScoredGameIndex"
+        const val FIELD_DRAW_OFFERED_BY = "drawOfferedBy"
+        const val FIELD_DRAW_OFFER_TURN_COUNT = "drawOfferTurnCount"
         private const val MAX_SPECTATOR_CODE_ATTEMPTS = 5
 
         @Volatile
@@ -138,7 +140,9 @@ class FirestoreWaliOnlineRepository(
                 FIELD_REMATCH_REQUESTED_BY to emptyList<String>(),
                 FIELD_GAMES_PLAYED to 1,
                 FIELD_STATS_BY_UID to initialStats,
-                FIELD_LAST_SCORED_GAME_INDEX to 0
+                FIELD_LAST_SCORED_GAME_INDEX to 0,
+                FIELD_DRAW_OFFERED_BY to null,
+                FIELD_DRAW_OFFER_TURN_COUNT to -1
             )
 
             docRef.set(data).await()
@@ -161,7 +165,9 @@ class FirestoreWaliOnlineRepository(
                 rematchRequestedBy = emptyList(),
                 gamesPlayed = 1,
                 statsByUid = initialStats,
-                lastScoredGameIndex = 0
+                lastScoredGameIndex = 0,
+                drawOfferedBy = null,
+                drawOfferTurnCount = -1
             )
         }
     }
@@ -355,7 +361,7 @@ class FirestoreWaliOnlineRepository(
                     }
 
                     val (updatedStats, newLastScoredIndex) = computeScoredSalonState(
-                        session = session,
+                        session = session.copy(gameState = newGameState),
                         winnerRole = newGameState.winner
                     )
 
@@ -364,6 +370,7 @@ class FirestoreWaliOnlineRepository(
                         FIELD_LAST_MOVE_AT to now,
                         FIELD_STATUS to OnlineGameStatus.FINISHED.value,
                         FIELD_WINNER to newGameState.winner?.name,
+                        FIELD_DRAW_OFFERED_BY to null,
                         FIELD_STATS_BY_UID to updatedStats,
                         FIELD_LAST_SCORED_GAME_INDEX to newLastScoredIndex
                     )
@@ -414,11 +421,144 @@ class FirestoreWaliOnlineRepository(
                     FIELD_STATUS to OnlineGameStatus.ABANDONED.value,
                     FIELD_WINNER to winnerPlayer.name,
                     FIELD_ABANDONED_BY to abandonedByUid,
+                    FIELD_DRAW_OFFERED_BY to null,
                     FIELD_STATS_BY_UID to updatedStats,
                     FIELD_LAST_SCORED_GAME_INDEX to newLastScoredIndex,
                     FIELD_LAST_MOVE_AT to now
                 )
                 transaction.update(docRef, updates)
+                null
+            }.await()
+            Unit
+        }
+    }
+
+    override suspend fun proposeDraw(code: String, uid: String): Result<Unit> {
+        return runCatching {
+            val actorUid = uid.ifBlank { ensureAuthenticated() }
+            if (actorUid.isBlank()) {
+                throw IllegalStateException("Authentification Firebase requise.")
+            }
+
+            val docRef = firestore.collection(COLLECTION_GAMES).document(code)
+            val now = System.currentTimeMillis()
+
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                if (!snapshot.exists()) {
+                    throw IllegalArgumentException("Salon introuvable.")
+                }
+                val session = parseSession(snapshot)
+                    ?: throw IllegalStateException("Format de salon invalide.")
+
+                if (!session.isParticipant(actorUid)) {
+                    throw IllegalStateException("Seul un joueur participant peut proposer un match nul.")
+                }
+                if (session.status != OnlineGameStatus.ONGOING) {
+                    throw IllegalStateException("La partie n'est pas en cours.")
+                }
+                if (session.gameState.phase != com.example.wali.model.Phase.MOVEMENT || session.gameState.winner != null) {
+                    throw IllegalStateException("Le match nul ne peut être proposé qu'en phase de déplacement.")
+                }
+                if (!session.isPlayerTurn(actorUid)) {
+                    throw IllegalStateException("Vous ne pouvez proposer un match nul que pendant votre tour.")
+                }
+                if (session.drawOfferedBy != null) {
+                    throw IllegalStateException("Une proposition de match nul est déjà en attente.")
+                }
+                val currentTurnCount = session.gameState.moveHistory.size
+                if (session.drawOfferTurnCount >= 0 && currentTurnCount <= session.drawOfferTurnCount) {
+                    throw IllegalStateException("Vous devez attendre au moins un tour complet avant de reproposer un match nul.")
+                }
+
+                transaction.update(
+                    docRef,
+                    mapOf(
+                        FIELD_DRAW_OFFERED_BY to actorUid,
+                        FIELD_DRAW_OFFER_TURN_COUNT to currentTurnCount,
+                        FIELD_LAST_MOVE_AT to now
+                    )
+                )
+                null
+            }.await()
+            Unit
+        }
+    }
+
+    override suspend fun respondToDraw(code: String, accept: Boolean, uid: String): Result<Unit> {
+        return runCatching {
+            val actorUid = uid.ifBlank { ensureAuthenticated() }
+            if (actorUid.isBlank()) {
+                throw IllegalStateException("Authentification Firebase requise.")
+            }
+
+            val docRef = firestore.collection(COLLECTION_GAMES).document(code)
+            val now = System.currentTimeMillis()
+
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                if (!snapshot.exists()) {
+                    throw IllegalArgumentException("Salon introuvable.")
+                }
+                val session = parseSession(snapshot)
+                    ?: throw IllegalStateException("Format de salon invalide.")
+
+                if (!session.isParticipant(actorUid)) {
+                    throw IllegalStateException("Seul un joueur participant peut répondre au match nul.")
+                }
+                if (session.status != OnlineGameStatus.ONGOING) {
+                    return@runTransaction null
+                }
+                val offeredBy = session.drawOfferedBy
+                    ?: throw IllegalStateException("Aucune proposition de match nul en attente.")
+                if (offeredBy == actorUid) {
+                    throw IllegalStateException("Seul l'adversaire peut répondre à la proposition de match nul.")
+                }
+
+                if (accept) {
+                    val endedState = session.gameState.copy(
+                        phase = com.example.wali.model.Phase.GAME_OVER,
+                        winner = null,
+                        pendingCaptures = 0,
+                        moveHistory = session.gameState.moveHistory + "Match nul — Les deux joueurs ont accepté."
+                    )
+                    val stateJson = WaliGameSerializer.serializeGameState(endedState)
+                    val (updatedStats, newLastScoredIndex) = computeScoredSalonState(
+                        session = session.copy(gameState = endedState),
+                        winnerRole = null
+                    )
+
+                    transaction.update(
+                        docRef,
+                        mapOf(
+                            FIELD_GAME_STATE_JSON to stateJson,
+                            FIELD_STATUS to OnlineGameStatus.FINISHED.value,
+                            FIELD_WINNER to null,
+                            FIELD_DRAW_OFFERED_BY to null,
+                            FIELD_STATS_BY_UID to updatedStats,
+                            FIELD_LAST_SCORED_GAME_INDEX to newLastScoredIndex,
+                            FIELD_LAST_MOVE_AT to now
+                        )
+                    )
+                } else {
+                    val refuserRole = session.getPlayerRole(actorUid)
+                    val baseState = session.gameState.copy(pendingCaptures = 0)
+                    val nextState = if (refuserRole != null && baseState.currentPlayer != refuserRole) {
+                        com.example.wali.engine.WaliEngine.switchPlayer(baseState)
+                    } else {
+                        baseState
+                    }
+                    val stateJson = WaliGameSerializer.serializeGameState(nextState)
+
+                    transaction.update(
+                        docRef,
+                        mapOf(
+                            FIELD_GAME_STATE_JSON to stateJson,
+                            FIELD_DRAW_OFFERED_BY to null,
+                            FIELD_LAST_MOVE_AT to now
+                        )
+                    )
+                }
                 null
             }.await()
             Unit
@@ -582,6 +722,8 @@ class FirestoreWaliOnlineRepository(
                             FIELD_GAME_STATE_JSON to newStateJson,
                             FIELD_WINNER to null,
                             FIELD_ABANDONED_BY to null,
+                            FIELD_DRAW_OFFERED_BY to null,
+                            FIELD_DRAW_OFFER_TURN_COUNT to -1,
                             FIELD_REMATCH_REQUESTED_BY to emptyList<String>(),
                             FIELD_GAMES_PLAYED to newGamesPlayed,
                             FIELD_STATS_BY_UID to updatedStats,
@@ -679,6 +821,8 @@ class FirestoreWaliOnlineRepository(
         val gamesPlayed = (doc.getLong(FIELD_GAMES_PLAYED) ?: 1L).toInt().coerceAtLeast(1)
         val statsByUid = parseStatsMap(doc.get(FIELD_STATS_BY_UID))
         val lastScoredGameIndex = (doc.getLong(FIELD_LAST_SCORED_GAME_INDEX) ?: 0L).toInt().coerceAtLeast(0)
+        val drawOfferedBy = doc.getString(FIELD_DRAW_OFFERED_BY)?.takeIf { it.isNotBlank() }
+        val drawOfferTurnCount = (doc.getLong(FIELD_DRAW_OFFER_TURN_COUNT) ?: -1L).toInt()
 
         return OnlineGameSession(
             code = code,
@@ -698,8 +842,19 @@ class FirestoreWaliOnlineRepository(
             rematchRequestedBy = rematchRequestedBy,
             gamesPlayed = gamesPlayed,
             statsByUid = statsByUid,
-            lastScoredGameIndex = lastScoredGameIndex
+            lastScoredGameIndex = lastScoredGameIndex,
+            drawOfferedBy = drawOfferedBy,
+            drawOfferTurnCount = drawOfferTurnCount
         )
+    }
+
+    /**
+     * Retourne le nombre de points attribués au vainqueur [winnerRole] pour la manche :
+     * 2 points si le perdant a 0 capture (victoire écrasante), 1 point sinon.
+     */
+    private fun pointsForWin(session: OnlineGameSession, winnerRole: Player): Int {
+        val loserRole = winnerRole.opponent
+        return if (session.gameState.capturesMadeBy(loserRole) == 0) 2 else 1
     }
 
     /**
@@ -717,7 +872,7 @@ class FirestoreWaliOnlineRepository(
      * Exclusivité des participants (D.3) :
      * Seuls [OnlineGameSession.creatorUid] et [OnlineGameSession.opponentUid] peuvent figurer dans [statsByUid].
      *
-     * Manche sans vainqueur (Point 3) :
+     * Manche sans vainqueur (Point 3 / Match nul) :
      * Si [winnerRole] est null alors que le salon est complet, la manche est marquée comme résolue
      * (lastScoredGameIndex = gamesPlayed) sans incrémenter le score d'aucun joueur.
      */
@@ -755,7 +910,7 @@ class FirestoreWaliOnlineRepository(
         if (winnerRole != null) {
             val winnerUid = session.resolveParticipantUidForRole(winnerRole)
             if (winnerUid != null && winnerUid in allowedParticipants) {
-                sanitizedStats[winnerUid] = (sanitizedStats[winnerUid] ?: 0) + 1
+                sanitizedStats[winnerUid] = (sanitizedStats[winnerUid] ?: 0) + pointsForWin(session, winnerRole)
             }
         }
 
