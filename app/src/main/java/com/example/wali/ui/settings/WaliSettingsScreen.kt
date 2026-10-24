@@ -56,6 +56,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -75,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.wali.ads.WaliAdManager
 import com.example.wali.ai.WaliAiBenchmark
+import com.example.wali.ai.WaliAiDiagnostics
 import com.example.wali.ui.theme.LocalWaliColors
 import com.example.wali.ui.theme.WaliThemePalette
 import com.example.wali.ui.theme.getColorsForPalette
@@ -1194,6 +1196,123 @@ private fun AiDiagnosticBenchmarkCard() {
                             color = colors.textPrimary
                         )
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Ligne de séparation
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(colors.gridLine.copy(alpha = 0.25f))
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Historique des coups de l'IA en partie réelle
+            val realGameHistory = remember { mutableStateOf(WaliAiDiagnostics.getHistory()) }
+            val historyCopied = remember { mutableStateOf(false) }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Historique réel IA (${realGameHistory.value.size})",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            realGameHistory.value = WaliAiDiagnostics.getHistory()
+                            historyCopied.value = false
+                        },
+                        modifier = Modifier.testTag("btn_refresh_ai_history")
+                    ) {
+                        Text(
+                            text = "Actualiser",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accentEarth
+                            )
+                        )
+                    }
+
+                    if (realGameHistory.value.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                val textToCopy = realGameHistory.value.joinToString("\n\n") { it.formatDisplay() }
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("WaliAiHistory", textToCopy))
+                                historyCopied.value = true
+                            },
+                            modifier = Modifier.testTag("btn_copy_ai_history")
+                        ) {
+                            Text(
+                                text = if (historyCopied.value) "Copié !" else "Copier",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            if (realGameHistory.value.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.surfaceAlt.copy(alpha = 0.5f))
+                        .padding(12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Aucun coup d'IA enregistré. Jouez contre l'ordinateur en partie réelle pour afficher les métriques en direct (profondeur atteinte, nps, temps de recherche, raccourcis).",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = colors.textSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    realGameHistory.value.take(15).forEach { turn ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(colors.surfaceAlt.copy(alpha = 0.6f))
+                                .border(1.dp, colors.gridLine.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                text = turn.formatDisplay(),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
+                                    color = colors.textPrimary
+                                )
+                            )
+                        }
+                    }
                 }
             }
         }

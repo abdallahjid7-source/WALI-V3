@@ -27,7 +27,11 @@ data class AiMove(
     val placement: Position? = null,
     val moveFrom: Position? = null,
     val moveTo: Position? = null,
-    val captureTarget: Position? = null
+    val captureTarget: Position? = null,
+    val completedDepth: Int = 0,
+    val nodeCount: Int = 0,
+    val searchTimeMs: Long = 0L,
+    val shortcutReason: String? = null
 )
 
 /**
@@ -354,19 +358,38 @@ object WaliAi {
             Phase.PLACEMENT -> {
                 val validPlacements = WaliEngine.getValidPlacements(state)
                 if (validPlacements.isEmpty()) null
-                else AiMove(placement = validPlacements.random(random))
+                else AiMove(
+                    placement = validPlacements.random(random),
+                    completedDepth = 0,
+                    nodeCount = 1,
+                    searchTimeMs = 0L,
+                    shortcutReason = "Mode Facile (aléatoire)"
+                )
             }
             Phase.MOVEMENT -> {
                 if (WaliEngine.isPlacementRequired(state)) {
                     val validPlacements = WaliEngine.getValidPlacements(state)
                     if (validPlacements.isEmpty()) null
-                    else AiMove(placement = validPlacements.random(random))
+                    else AiMove(
+                        placement = validPlacements.random(random),
+                        completedDepth = 0,
+                        nodeCount = 1,
+                        searchTimeMs = 0L,
+                        shortcutReason = "Mode Facile (aléatoire)"
+                    )
                 } else {
                     val allMoves = getAllLegalMoves(state)
                     if (allMoves.isEmpty()) null
                     else {
                         val selected = allMoves.random(random)
-                        AiMove(moveFrom = selected.first, moveTo = selected.second)
+                        AiMove(
+                            moveFrom = selected.first,
+                            moveTo = selected.second,
+                            completedDepth = 0,
+                            nodeCount = 1,
+                            searchTimeMs = 0L,
+                            shortcutReason = "Mode Facile (aléatoire)"
+                        )
                     }
                 }
             }
@@ -392,7 +415,13 @@ object WaliAi {
 
                 val maxScore = scored.maxOf { it.second }
                 val best = scored.filter { it.second == maxScore }.map { it.first }
-                AiMove(placement = best.random(random))
+                AiMove(
+                    placement = best.random(random),
+                    completedDepth = 2,
+                    nodeCount = validPlacements.size,
+                    searchTimeMs = 0L,
+                    shortcutReason = "Mode Moyen (heuristique 2 plis)"
+                )
             }
             Phase.MOVEMENT -> {
                 if (WaliEngine.isPlacementRequired(state)) {
@@ -404,7 +433,13 @@ object WaliAi {
                     }
                     val maxScore = scored.maxOf { it.second }
                     val best = scored.filter { it.second == maxScore }.map { it.first }
-                    return AiMove(placement = best.random(random))
+                    return AiMove(
+                        placement = best.random(random),
+                        completedDepth = 2,
+                        nodeCount = validPlacements.size,
+                        searchTimeMs = 0L,
+                        shortcutReason = "Mode Moyen (heuristique 2 plis)"
+                    )
                 }
 
                 val allMoves = getAllLegalMoves(state)
@@ -419,7 +454,14 @@ object WaliAi {
                 }
                 if (immediateWinningMoves.isNotEmpty()) {
                     val chosen = immediateWinningMoves.random(random)
-                    return AiMove(moveFrom = chosen.first, moveTo = chosen.second)
+                    return AiMove(
+                        moveFrom = chosen.first,
+                        moveTo = chosen.second,
+                        completedDepth = 1,
+                        nodeCount = 1,
+                        searchTimeMs = 0L,
+                        shortcutReason = "Mode Moyen (gain immédiat)"
+                    )
                 }
 
                 val captureMoves = allMoves.filter { (from, to) ->
@@ -428,7 +470,14 @@ object WaliAi {
                 }
                 if (captureMoves.isNotEmpty()) {
                     val chosen = captureMoves.random(random)
-                    return AiMove(moveFrom = chosen.first, moveTo = chosen.second)
+                    return AiMove(
+                        moveFrom = chosen.first,
+                        moveTo = chosen.second,
+                        completedDepth = 1,
+                        nodeCount = 1,
+                        searchTimeMs = 0L,
+                        shortcutReason = "Mode Moyen (capture immédiate)"
+                    )
                 }
 
                 // 2. Recherche Alpha-Beta profondeur 3 avec évaluation tactique
@@ -452,7 +501,14 @@ object WaliAi {
                 }
 
                 val chosen = (bestCandidates.ifEmpty { allMoves }).random(random)
-                AiMove(moveFrom = chosen.first, moveTo = chosen.second)
+                AiMove(
+                    moveFrom = chosen.first,
+                    moveTo = chosen.second,
+                    completedDepth = 3,
+                    nodeCount = ordered.size,
+                    searchTimeMs = 0L,
+                    shortcutReason = "Mode Moyen (alpha-beta 3 plis)"
+                )
             }
             Phase.GAME_OVER -> null
         }
@@ -558,8 +614,8 @@ object WaliAi {
         var lastSearchNodeCount: Int = 0
         var lastPlannedCaptureTarget: Position? = null
         var lastTtPerspectivePlayer: Player? = null
+        var localGameSessionId: Long = 0L
 
-        var useOpeningBook: Boolean = false
         var randomizeRootTieBreaks: Boolean = false
         var rootScoreNoiseMargin: Int = 0
         var gameMovementHistoryHashes: Set<Long> = emptySet()
@@ -592,6 +648,14 @@ object WaliAi {
     }
 
     private val threadContext = ThreadLocal.withInitial { ThreadSearchContext() }
+
+    @Volatile
+    var globalGameSessionId: Long = 1L
+
+    fun notifyNewGameStarted() {
+        globalGameSessionId++
+        clearTranspositionTable()
+    }
 
     var isTranspositionTableEnabled: Boolean = true
 
@@ -626,16 +690,9 @@ object WaliAi {
     var maxSearchExtensions: Int = 2
 
     /**
-     * Active ou désactive la consultation du livre d'ouverture (Phase 7) pour les duels d'auto-affrontement.
-     */
-    var useOpeningBook: Boolean
-        get() = threadContext.get().useOpeningBook
-        set(value) { threadContext.get().useOpeningBook = value }
-
-    /**
      * Active le départage aléatoire (via le [Random] fourni à [chooseMove]) entre les coups racines
      * ayant un score statique et minimax strictement ex-æquo, afin d'éviter le biais d'indice (0,0)
-     * lors des campagnes d'auto-affrontement sur 200 parties.
+     * lors des campagnes d'auto-affrontement.
      */
     var randomizeRootTieBreaks: Boolean
         get() = threadContext.get().randomizeRootTieBreaks
@@ -779,13 +836,21 @@ object WaliAi {
         if (validPlacements.size == 1) {
             lastSearchCompletedDepth = 1
             lastSearchNodeCount = 1
-            return AiMove(placement = validPlacements.first())
+            return AiMove(
+                placement = validPlacements.first(),
+                completedDepth = 1,
+                nodeCount = 1,
+                searchTimeMs = 0L,
+                shortcutReason = "Coup forcé (unique case libre)"
+            )
         }
 
         val aiPlayer = state.currentPlayer
-        if (lastTtPerspectivePlayer != aiPlayer) {
-            clearTranspositionTable()
-            lastTtPerspectivePlayer = aiPlayer
+        val ctx = threadContext.get()
+        if (ctx.localGameSessionId != globalGameSessionId || ctx.lastTtPerspectivePlayer != aiPlayer) {
+            ctx.clearTt()
+            ctx.localGameSessionId = globalGameSessionId
+            ctx.lastTtPerspectivePlayer = aiPlayer
         }
         val startTime = System.currentTimeMillis()
         val deadline = startTime + timeBudgetMs
@@ -807,15 +872,18 @@ object WaliAi {
             IntArray(Position.TOTAL_CELLS) { random.nextInt(-noiseMargin, noiseMargin + 1) }
         } else null
 
+        val reserveMs = minOf(20L, timeBudgetMs / 10L)
         for (targetDepth in 1..24) {
             val now = System.currentTimeMillis()
-            if (targetDepth > 1 && (now >= deadline - 20L || isCancelled())) {
+            if (targetDepth > 1 && (now >= deadline - reserveMs || isCancelled())) {
                 break
             }
 
             var iterationBestPlacement: Position? = null
             var iterationBestScore = Int.MIN_VALUE
             var interrupted = false
+            var evaluatedMovesInIter = 0
+            val iterScoredPlacements = mutableListOf<Pair<Position, Int>>()
 
             if (completedBestPlacement != null) {
                 placementList = listOf(completedBestPlacement) + placementList.filter { it != completedBestPlacement }
@@ -823,9 +891,11 @@ object WaliAi {
 
             var alpha = Int.MIN_VALUE + 1000
             val beta = Int.MAX_VALUE
+            val iterDeadline = if (targetDepth == 1) Long.MAX_VALUE else deadline
+            val iterExtensions = if (targetDepth >= 3) maxSearchExtensions else 0
 
             for (pos in placementList) {
-                if (isCancelled() || System.currentTimeMillis() >= deadline) {
+                if (isCancelled() || (targetDepth > 1 && System.currentTimeMillis() >= deadline)) {
                     interrupted = true
                     break
                 }
@@ -845,11 +915,11 @@ object WaliAi {
                             beta = beta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
                             aiPlayer = aiPlayer,
-                            deadline = deadline,
+                            deadline = iterDeadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCounter,
                             plyFromRoot = 1,
-                            extensionsLeft = maxSearchExtensions,
+                            extensionsLeft = iterExtensions,
                             lastMoveWasCapture = false
                         )
                     }
@@ -858,11 +928,14 @@ object WaliAi {
                     break
                 }
 
+                evaluatedMovesInIter++
                 val score = if (placementNoise != null && rawScore in -50_000..50_000) {
                     rawScore + placementNoise[pos.row * Position.COLS + pos.col]
                 } else {
                     rawScore
                 }
+
+                iterScoredPlacements.add(pos to score)
 
                 if (score > iterationBestScore) {
                     iterationBestScore = score
@@ -871,24 +944,45 @@ object WaliAi {
                 alpha = maxOf(alpha, score)
             }
 
-            if (!interrupted && iterationBestPlacement != null) {
-                completedBestPlacement = iterationBestPlacement
-                completedBestScore = iterationBestScore
+            if (!interrupted && iterScoredPlacements.isNotEmpty()) {
+                val maxScore = iterScoredPlacements.maxOf { it.second }
+                // Étape 3 : Variabilité sans perte de force
+                // 1 pion = 1200 points. Marge d'équivalence = 12 points (< 1% d'un pion).
+                // Lors des premières poses (>= 11 pions restants), marge portée à 20 points pour diversifier les ouvertures.
+                val eqMargin = if (state.sticksRemaining >= 11) 20 else 12
+                val topCandidates = if (maxScore >= 90_000) {
+                    iterScoredPlacements.filter { it.second == maxScore }.map { it.first }
+                } else {
+                    iterScoredPlacements.filter { it.second >= maxScore - eqMargin }.map { it.first }
+                }
+                completedBestPlacement = topCandidates.random(random)
+                completedBestScore = maxScore
                 lastCompletedDepth = targetDepth
 
                 if (completedBestScore >= 90_000) {
                     break
                 }
             } else {
+                if (evaluatedMovesInIter >= 1 && iterationBestPlacement != null) {
+                    completedBestPlacement = iterationBestPlacement
+                    completedBestScore = iterationBestScore
+                }
                 break
             }
         }
 
         lastSearchCompletedDepth = lastCompletedDepth
         lastSearchNodeCount = nodeCounter[0]
+        val searchElapsed = maxOf(0L, System.currentTimeMillis() - startTime)
 
         val chosen = completedBestPlacement ?: validPlacements.first()
-        return AiMove(placement = chosen)
+        return AiMove(
+            placement = chosen,
+            completedDepth = lastCompletedDepth,
+            nodeCount = nodeCounter[0],
+            searchTimeMs = searchElapsed,
+            shortcutReason = null
+        )
     }
 
     private fun chooseHardMove(
@@ -908,15 +1002,33 @@ object WaliAi {
                     return chooseHardPlacementMove(state, random, timeBudgetMs, isCancelled)
                 }
 
-                if (lastTtPerspectivePlayer != aiPlayer) {
-                    clearTranspositionTable()
-                    lastTtPerspectivePlayer = aiPlayer
+                val ctx = threadContext.get()
+                if (ctx.localGameSessionId != globalGameSessionId || ctx.lastTtPerspectivePlayer != aiPlayer) {
+                    ctx.clearTt()
+                    ctx.localGameSessionId = globalGameSessionId
+                    ctx.lastTtPerspectivePlayer = aiPlayer
                 }
 
                 val tLegal0 = if (isProfilingEnabled) System.nanoTime() else 0L
                 val allMoves = getAllLegalMoves(state)
                 if (isProfilingEnabled) profileTimeLegalMovesNanos += System.nanoTime() - tLegal0
                 if (allMoves.isEmpty()) return null
+
+                if (allMoves.size == 1) {
+                    val single = allMoves.first()
+                    lastSearchCompletedDepth = 1
+                    lastSearchNodeCount = 1
+                    lastPlannedCaptureTarget = null
+                    return AiMove(
+                        moveFrom = single.first,
+                        moveTo = single.second,
+                        captureTarget = null,
+                        completedDepth = 1,
+                        nodeCount = 1,
+                        searchTimeMs = 0L,
+                        shortcutReason = "Coup forcé (unique coup légal)"
+                    )
+                }
 
                 // 1. Détection immédiate des coups gagnants à 1 temps
                 for ((from, to) in allMoves) {
@@ -927,7 +1039,15 @@ object WaliAi {
                         lastSearchCompletedDepth = 1
                         lastSearchNodeCount = 1
                         lastPlannedCaptureTarget = null
-                        return AiMove(moveFrom = from, moveTo = to, captureTarget = null)
+                        return AiMove(
+                            moveFrom = from,
+                            moveTo = to,
+                            captureTarget = null,
+                            completedDepth = 1,
+                            nodeCount = 1,
+                            searchTimeMs = 0L,
+                            shortcutReason = "Victoire immédiate (1 pli)"
+                        )
                     }
                     if (WaliEngine.canCapture(nextState)) {
                         val tCap0 = if (isProfilingEnabled) System.nanoTime() else 0L
@@ -939,7 +1059,15 @@ object WaliAi {
                                 lastSearchCompletedDepth = 1
                                 lastSearchNodeCount = 1
                                 lastPlannedCaptureTarget = target
-                                return AiMove(moveFrom = from, moveTo = to, captureTarget = target)
+                                return AiMove(
+                                    moveFrom = from,
+                                    moveTo = to,
+                                    captureTarget = target,
+                                    completedDepth = 1,
+                                    nodeCount = 1,
+                                    searchTimeMs = 0L,
+                                    shortcutReason = "Victoire immédiate avec capture (1 pli)"
+                                )
                             }
                         }
                         if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap0
@@ -975,16 +1103,21 @@ object WaliAi {
                 val repetitionScore = if (historyHashes.isNotEmpty()) {
                     minOf(0, rootEval) - 350
                 } else 0
-                val ctx = threadContext.get()
                 ctx.currentRepetitionScore = repetitionScore
                 ctx.currentOpponentRepetitionScore = if (historyHashes.isNotEmpty()) {
                     if (rootEval > 0) -350 else rootEval + 350
                 } else 0
 
+                data class ScoredRootMoveCandidate(
+                    val move: Pair<Position, Position>,
+                    val score: Int,
+                    val captureTarget: Position?
+                )
+
+                val reserveMs = minOf(20L, timeBudgetMs / 10L)
                 for (targetDepth in 1..24) {
-                    // S'il reste moins de 20ms de budget, ne pas lancer une nouvelle profondeur
                     val now = System.currentTimeMillis()
-                    if (targetDepth > 1 && (now >= deadline - 20L || isCancelled())) {
+                    if (targetDepth > 1 && (now >= deadline - reserveMs || isCancelled())) {
                         break
                     }
 
@@ -992,6 +1125,8 @@ object WaliAi {
                     var iterationBestScore = Int.MIN_VALUE
                     var iterationBestCapTarget: Position? = null
                     var interrupted = false
+                    var evaluatedMovesInIter = 0
+                    val iterScoredMoves = mutableListOf<ScoredRootMoveCandidate>()
 
                     // Si on a un coup préféré de l'itération précédente, le placer impérativement en tête
                     if (completedBestMove != null) {
@@ -1000,9 +1135,11 @@ object WaliAi {
 
                     var alpha = Int.MIN_VALUE + 1000
                     val beta = Int.MAX_VALUE
+                    val iterDeadline = if (targetDepth == 1) Long.MAX_VALUE else deadline
+                    val iterExtensions = if (targetDepth >= 3) maxSearchExtensions else 0
 
                     for ((from, to) in moveList) {
-                        if (isCancelled() || System.currentTimeMillis() >= deadline) {
+                        if (isCancelled() || (targetDepth > 1 && System.currentTimeMillis() >= deadline)) {
                             interrupted = true
                             break
                         }
@@ -1027,11 +1164,11 @@ object WaliAi {
                                         beta = beta,
                                         isMaximizing = false,
                                         aiPlayer = aiPlayer,
-                                        deadline = deadline,
+                                        deadline = iterDeadline,
                                         isCancelled = isCancelled,
                                         nodeCount = nodeCounter,
                                         plyFromRoot = 1,
-                                        extensionsLeft = maxSearchExtensions,
+                                        extensionsLeft = iterExtensions,
                                         lastMoveWasCapture = true
                                     )
                                 } else {
@@ -1051,11 +1188,11 @@ object WaliAi {
                                             beta = beta,
                                             isMaximizing = false,
                                             aiPlayer = aiPlayer,
-                                            deadline = deadline,
+                                            deadline = iterDeadline,
                                             isCancelled = isCancelled,
                                             nodeCount = nodeCounter,
                                             plyFromRoot = 1,
-                                            extensionsLeft = maxSearchExtensions,
+                                            extensionsLeft = iterExtensions,
                                             lastMoveWasCapture = true
                                         )
                                         if (s > bestCapScore || moveCapTarget == null) {
@@ -1078,11 +1215,11 @@ object WaliAi {
                                         beta = beta,
                                         isMaximizing = false,
                                         aiPlayer = aiPlayer,
-                                        deadline = deadline,
+                                        deadline = iterDeadline,
                                         isCancelled = isCancelled,
                                         nodeCount = nodeCounter,
                                         plyFromRoot = 1,
-                                        extensionsLeft = maxSearchExtensions,
+                                        extensionsLeft = iterExtensions,
                                         lastMoveWasCapture = false
                                     )
                                 }
@@ -1092,12 +1229,15 @@ object WaliAi {
                             break
                         }
 
+                        evaluatedMovesInIter++
                         val score = if (moveNoise != null && rawScore in -50_000..50_000) {
                             val mIdx = (from.row * Position.COLS + from.col) * Position.TOTAL_CELLS + (to.row * Position.COLS + to.col)
                             rawScore + moveNoise[mIdx]
                         } else {
                             rawScore
                         }
+
+                        iterScoredMoves.add(ScoredRootMoveCandidate(from to to, score, moveCapTarget))
 
                         if (score > iterationBestScore) {
                             iterationBestScore = score
@@ -1107,11 +1247,21 @@ object WaliAi {
                         alpha = maxOf(alpha, score)
                     }
 
-                    // Ne sauvegarder le meilleur coup QUE si l'itération entière s'est terminée avec succès
-                    if (!interrupted && iterationBestMove != null) {
-                        completedBestMove = iterationBestMove
-                        completedBestScore = iterationBestScore
-                        completedBestCapTarget = iterationBestCapTarget
+                    // Sauvegarder le meilleur coup de l'itération terminée avec anti-déterminisme
+                    if (!interrupted && iterScoredMoves.isNotEmpty()) {
+                        val maxScore = iterScoredMoves.maxOf { it.score }
+                        // Étape 3 : Variabilité sans perte de force
+                        // En phase de déplacement, marge stricte de 12 points (< 1% d'un pion).
+                        // Si le meilleur coup a 13 points d'avance sur le 2e, il est joué à 100%.
+                        val topCandidates = if (maxScore >= 90_000) {
+                            iterScoredMoves.filter { it.score == maxScore }
+                        } else {
+                            iterScoredMoves.filter { it.score >= maxScore - 12 }
+                        }
+                        val chosenCandidate = topCandidates.random(random)
+                        completedBestMove = chosenCandidate.move
+                        completedBestScore = maxScore
+                        completedBestCapTarget = chosenCandidate.captureTarget
                         lastCompletedDepth = targetDepth
 
                         // Si gain forcé absolu trouvé, arrêter la recherche immédiatement
@@ -1119,16 +1269,30 @@ object WaliAi {
                             break
                         }
                     } else {
-                        break // Interrompu par timeout ou annulation : on conserve completedBestMove de l'itération précédente
+                        if (evaluatedMovesInIter >= 1 && iterationBestMove != null) {
+                            completedBestMove = iterationBestMove
+                            completedBestScore = iterationBestScore
+                            completedBestCapTarget = iterationBestCapTarget
+                        }
+                        break
                     }
                 }
 
                 lastSearchCompletedDepth = lastCompletedDepth
                 lastSearchNodeCount = nodeCounter[0]
                 lastPlannedCaptureTarget = completedBestCapTarget
+                val searchElapsed = maxOf(0L, System.currentTimeMillis() - startTime)
 
                 val chosen = completedBestMove ?: allMoves.first()
-                AiMove(moveFrom = chosen.first, moveTo = chosen.second, captureTarget = completedBestCapTarget)
+                AiMove(
+                    moveFrom = chosen.first,
+                    moveTo = chosen.second,
+                    captureTarget = completedBestCapTarget,
+                    completedDepth = lastCompletedDepth,
+                    nodeCount = nodeCounter[0],
+                    searchTimeMs = searchElapsed,
+                    shortcutReason = null
+                )
             }
             Phase.GAME_OVER -> null
         }
@@ -2403,9 +2567,11 @@ object WaliAi {
         score += oppBlockedPieces * 160
         score -= aiBlockedPieces * 200
 
-        // 6. Alignements potentiels, fourchettes et navettes (parcours direct des 38 motifs)
+        // 6. Alignements potentiels, paires ouvertes, fourchettes et navettes (parcours direct des 38 motifs)
         var aiThreats = 0
         var oppThreats = 0
+        var aiOpenPairs = 0
+        var oppOpenPairs = 0
         var aiShuttles = 0
         var oppShuttles = 0
 
@@ -2434,7 +2600,7 @@ object WaliAi {
                 continue
             }
 
-            // Menace d'alignement à 1 temps pour aiPlayer
+            // Menace d'alignement à 1 temps ou paire ouverte pour aiPlayer
             if ((p0 == aiPlayer && p1 == aiPlayer && p2 == null) ||
                 (p0 == aiPlayer && p2 == aiPlayer && p1 == null) ||
                 (p1 == aiPlayer && p2 == aiPlayer && p0 == null)
@@ -2445,14 +2611,21 @@ object WaliAi {
                 ) {
                     val neighbors = fastNeighbors[emptyCell]
                     var hasFeeder = false
+                    var hasEmptySlot = false
                     for (k in 0 until neighbors.size) {
                         val n = neighbors[k]
-                        if (n != pat.c0 && n != pat.c1 && n != pat.c2 && flatBoard[n] == aiPlayer) {
-                            hasFeeder = true
-                            break
+                        if (n != pat.c0 && n != pat.c1 && n != pat.c2) {
+                            val np = flatBoard[n]
+                            if (np == aiPlayer) {
+                                hasFeeder = true
+                                break
+                            } else if (np == null) {
+                                hasEmptySlot = true
+                            }
                         }
                     }
                     if (hasFeeder) aiThreats++
+                    else if (hasEmptySlot) aiOpenPairs++
                 }
             } else if ((p0 == opponent && p1 == opponent && p2 == null) ||
                        (p0 == opponent && p2 == opponent && p1 == null) ||
@@ -2464,14 +2637,21 @@ object WaliAi {
                 ) {
                     val neighbors = fastNeighbors[emptyCell]
                     var hasFeeder = false
+                    var hasEmptySlot = false
                     for (k in 0 until neighbors.size) {
                         val n = neighbors[k]
-                        if (n != pat.c0 && n != pat.c1 && n != pat.c2 && flatBoard[n] == opponent) {
-                            hasFeeder = true
-                            break
+                        if (n != pat.c0 && n != pat.c1 && n != pat.c2) {
+                            val np = flatBoard[n]
+                            if (np == opponent) {
+                                hasFeeder = true
+                                break
+                            } else if (np == null) {
+                                hasEmptySlot = true
+                            }
                         }
                     }
                     if (hasFeeder) oppThreats++
+                    else if (hasEmptySlot) oppOpenPairs++
                 }
             }
         }
@@ -2487,10 +2667,16 @@ object WaliAi {
         // 7. Contrôle central
         score += (aiCenterPieces - oppCenterPieces) * 15
 
-        // 8. Phase 6b : Évaluation de pose orientée libertés futures, connectivité et anti-agglutination
+        // 8. Phase 6b : Évaluation de pose orientée libertés futures, paires préparatoires, connectivité et anti-agglutination
         if (state.phase == Phase.PLACEMENT || state.sticksPendingPlacement > 0 || state.stonesPendingPlacement > 0) {
             val aiDistinctLiberties = Integer.bitCount(aiDistinctEmptyMask)
             val oppDistinctLiberties = Integer.bitCount(oppDistinctEmptyMask)
+
+            // Paires ouvertes préparatoires et blocage des paires adverses avant l'arrivée du 3e pion feeder :
+            score += aiOpenPairs * 180
+            score -= oppOpenPairs * 220
+            if (aiOpenPairs >= 2) score += 250
+            if (oppOpenPairs >= 2) score -= 320
 
             // 8a. Terme de liberté future fortement pondéré :
             score += (aiDistinctLiberties - oppDistinctLiberties) * 85

@@ -300,6 +300,69 @@ class WaliEngineTest {
     }
 
     @Test
+    fun engine_alignmentOfFourOrFive_grantsNoCapture() {
+        // Cas 1 : 4 pions contigus en rangée (horizontal)
+        val fourRow = listOf(Position(1, 1), Position(1, 2), Position(1, 3), Position(1, 4))
+        val stateFourRow = createMovementState(sticks = fourRow, stones = listOf(Position(4, 5)))
+        assertTrue("4 pions en rangée ne doivent produire aucune ligne", WaliEngine.detectLines(stateFourRow.board, Player.STICKS).isEmpty())
+
+        // Mouvement créant 4 pions en rangée
+        val beforeMoveFourRow = createMovementState(
+            sticks = listOf(Position(1, 1), Position(1, 2), Position(1, 4), Position(0, 3)),
+            stones = listOf(Position(4, 5)),
+            currentPlayer = Player.STICKS
+        )
+        val afterMoveFourRow = WaliEngine.movePiece(beforeMoveFourRow, Position(0, 3), Position(1, 3))
+        assertEquals("Créer 4 pions en rangée ne donne aucune capture", 0, afterMoveFourRow.pendingCaptures)
+        assertFalse(WaliEngine.canCapture(afterMoveFourRow))
+
+        // Cas 2 : 4 pions contigus en colonne (vertical)
+        val fourCol = listOf(Position(0, 2), Position(1, 2), Position(2, 2), Position(3, 2))
+        val stateFourCol = createMovementState(sticks = fourCol, stones = listOf(Position(4, 5)))
+        assertTrue("4 pions en colonne ne doivent produire aucune ligne", WaliEngine.detectLines(stateFourCol.board, Player.STICKS).isEmpty())
+
+        // Mouvement créant 4 pions en colonne
+        val beforeMoveFourCol = createMovementState(
+            sticks = listOf(Position(0, 2), Position(1, 2), Position(3, 2), Position(2, 1)),
+            stones = listOf(Position(4, 5)),
+            currentPlayer = Player.STICKS
+        )
+        val afterMoveFourCol = WaliEngine.movePiece(beforeMoveFourCol, Position(2, 1), Position(2, 2))
+        assertEquals("Créer 4 pions en colonne ne donne aucune capture", 0, afterMoveFourCol.pendingCaptures)
+        assertFalse(WaliEngine.canCapture(afterMoveFourCol))
+
+        // Cas 3 : 5 pions contigus en rangée (horizontal)
+        val fiveRow = listOf(Position(2, 0), Position(2, 1), Position(2, 2), Position(2, 3), Position(2, 4))
+        val stateFiveRow = createMovementState(sticks = fiveRow, stones = listOf(Position(4, 5)))
+        assertTrue("5 pions en rangée ne doivent produire aucune ligne", WaliEngine.detectLines(stateFiveRow.board, Player.STICKS).isEmpty())
+
+        // Mouvement créant 5 pions en rangée
+        val beforeMoveFiveRow = createMovementState(
+            sticks = listOf(Position(2, 0), Position(2, 1), Position(2, 3), Position(2, 4), Position(1, 2)),
+            stones = listOf(Position(4, 5)),
+            currentPlayer = Player.STICKS
+        )
+        val afterMoveFiveRow = WaliEngine.movePiece(beforeMoveFiveRow, Position(1, 2), Position(2, 2))
+        assertEquals("Créer 5 pions en rangée ne donne aucune capture", 0, afterMoveFiveRow.pendingCaptures)
+        assertFalse(WaliEngine.canCapture(afterMoveFiveRow))
+
+        // Cas 4 : 5 pions contigus en colonne (vertical - toute la hauteur 0..4)
+        val fiveCol = listOf(Position(0, 3), Position(1, 3), Position(2, 3), Position(3, 3), Position(4, 3))
+        val stateFiveCol = createMovementState(sticks = fiveCol, stones = listOf(Position(4, 5)))
+        assertTrue("5 pions en colonne ne doivent produire aucune ligne", WaliEngine.detectLines(stateFiveCol.board, Player.STICKS).isEmpty())
+
+        // Mouvement créant 5 pions en colonne
+        val beforeMoveFiveCol = createMovementState(
+            sticks = listOf(Position(0, 3), Position(1, 3), Position(3, 3), Position(4, 3), Position(2, 4)),
+            stones = listOf(Position(4, 5)),
+            currentPlayer = Player.STICKS
+        )
+        val afterMoveFiveCol = WaliEngine.movePiece(beforeMoveFiveCol, Position(2, 4), Position(2, 3))
+        assertEquals("Créer 5 pions en colonne ne donne aucune capture", 0, afterMoveFiveCol.pendingCaptures)
+        assertFalse(WaliEngine.canCapture(afterMoveFiveCol))
+    }
+
+    @Test
     fun `detectNewLines ignore une ligne preexistante et detecte uniquement la nouvelle`() {
         // Avant le coup : ligne préexistante en ligne 0 (0,0), (0,1), (0,2) et un pion en (2,0)
         val sticksBefore = listOf(Position(0, 0), Position(0, 1), Position(0, 2), Position(2, 0), Position(3, 1), Position(3, 2))

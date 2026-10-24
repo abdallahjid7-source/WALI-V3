@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.wali.ai.AiDifficulty
 import com.example.wali.ai.WaliAi
+import com.example.wali.ai.WaliAiDiagnostics
 import com.example.wali.audio.WaliAudio
 import com.example.wali.audio.WaliAudioManager
 import com.example.wali.chat.ChatMessageType
@@ -95,7 +96,12 @@ class WaliViewModel(
     var aiDelayMs: Long = 650L
 
     /**
-     * Budget de temps de réflexion en millisecondes alloué au niveau Difficile (1000ms par défaut).
+     * Budget de temps de réflexion en millisecondes alloué au niveau Difficile (`AiDifficulty.HARD`).
+     * - Valeur par défaut : `1000L` (1000 ms par coup).
+     * - Plage raisonnable recommandée sur mobile : `300L` à `2000L` (300 ms à 2000 ms).
+     *   - 300–500 ms : réponse quasi instantanée, idéal sur appareils d'entrée de gamme.
+     *   - 1000 ms    : équilibre standard profondeur / fluidité.
+     *   - 1500–2000 ms : force maximale (+1 pli supplémentaire sur milieu de gamme).
      */
     var aiThinkBudgetMs: Long = 1000L
 
@@ -953,15 +959,41 @@ class WaliViewModel(
             }
 
             val searchStartTime = System.currentTimeMillis()
+            val budget = if (difficulty == AiDifficulty.HARD) aiThinkBudgetMs else 100L
 
             // Calcul du coup hors thread principal (Dispatchers.Default) avec budget adapté et interruption coopérative
             val aiMove = withContext(Dispatchers.Default) {
-                val budget = if (difficulty == AiDifficulty.HARD) aiThinkBudgetMs else 100L
                 WaliAi.chooseMove(
                     state = currentState,
                     difficulty = difficulty,
                     timeBudgetMs = budget,
                     isCancelled = { !coroutineContext.isActive }
+                )
+            }
+            val actualSearchDurationMs = maxOf(1L, System.currentTimeMillis() - searchStartTime)
+
+            if (aiMove != null) {
+                val depth = aiMove.completedDepth ?: WaliAi.lastSearchCompletedDepth
+                val nodes = (aiMove.nodeCount ?: WaliAi.lastSearchNodeCount).toLong()
+                val searchTime = aiMove.searchTimeMs ?: actualSearchDurationMs
+                val moveSummary = when {
+                    aiMove.placement != null -> "Pose (${aiMove.placement.row}, ${aiMove.placement.col})"
+                    aiMove.moveFrom != null && aiMove.moveTo != null ->
+                        "(${aiMove.moveFrom.row}, ${aiMove.moveFrom.col}) -> (${aiMove.moveTo.row}, ${aiMove.moveTo.col})" +
+                        (if (aiMove.captureTarget != null) " [x (${aiMove.captureTarget.row}, ${aiMove.captureTarget.col})]" else "")
+                    else -> "Coup"
+                }
+                WaliAiDiagnostics.recordTurn(
+                    player = currentState.currentPlayer,
+                    phase = currentState.phase,
+                    difficulty = difficulty,
+                    thinkBudgetMs = budget,
+                    searchTimeMs = searchTime,
+                    completedDepth = depth,
+                    nodeCount = nodes,
+                    moveSummary = moveSummary,
+                    shortcutReason = aiMove.shortcutReason,
+                    isProfilingEnabled = WaliAi.isProfilingEnabled
                 )
             }
 
@@ -1125,7 +1157,7 @@ class WaliViewModel(
     ) {
         audio?.playClick()
         aiTurnJob?.cancel()
-        WaliAi.clearTranspositionTable()
+        WaliAi.notifyNewGameStarted()
         if (mode != GameMode.ONLINE) {
             stopOnlineInactivityMonitoring()
             onlineSessionJob?.cancel()
@@ -1207,7 +1239,7 @@ class WaliViewModel(
     fun onGameOverContinue() {
         audio?.playClick()
         aiTurnJob?.cancel()
-        WaliAi.clearTranspositionTable()
+        WaliAi.notifyNewGameStarted()
 
         viewModelScope.launch {
             runCatching {

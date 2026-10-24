@@ -358,7 +358,6 @@ object WaliAiBenchmark {
         val name: String,
         val difficulty: AiDifficulty = AiDifficulty.HARD,
         val timeBudgetMs: Long = 200L,
-        val useOpeningBook: Boolean = false,
         val maxExtensions: Int = 2,
         val randomizeRootTieBreaks: Boolean = true,
         val rootScoreNoiseMargin: Int = 18
@@ -477,7 +476,6 @@ object WaliAiBenchmark {
                     movementHashCounts[WaliAi.computeZobristHash(state)] = 1
                 }
 
-                WaliAi.useOpeningBook = activeAgent.useOpeningBook
                 WaliAi.maxSearchExtensions = activeAgent.maxExtensions
                 WaliAi.randomizeRootTieBreaks = activeAgent.randomizeRootTieBreaks
                 WaliAi.rootScoreNoiseMargin = activeAgent.rootScoreNoiseMargin
@@ -541,7 +539,6 @@ object WaliAiBenchmark {
                 pliesInGame++
             }
         } finally {
-            WaliAi.useOpeningBook = false
             WaliAi.randomizeRootTieBreaks = false
             WaliAi.rootScoreNoiseMargin = 0
             WaliAi.gameMovementHistoryHashes = emptySet()

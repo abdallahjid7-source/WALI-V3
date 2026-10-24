@@ -16,7 +16,13 @@ import com.example.wali.ui.components.ModeSelectionDialog
 import com.example.wali.ui.rules.WaliRulesScreen
 import com.example.wali.ui.settings.WaliSettingsScreen
 import com.example.wali.ui.theme.WaliThemePalette
+import com.example.wali.engine.WaliEngine
+import com.example.wali.model.GameState
+import com.example.wali.model.Line
+import com.example.wali.model.Phase
+import com.example.wali.model.Position
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -41,15 +47,20 @@ class WaliRulesAndNavigationTest {
             )
         }
 
-        // Vérification du titre principal et de l'introduction
+        // Vérification de l'en-tête principal
         composeTestRule.onNodeWithText("Règles du Wali").assertIsDisplayed()
         composeTestRule.onNodeWithText("Jeu traditionnel Songhaï de Tombouctou").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Un trésor du désert malien").assertIsDisplayed()
 
-        // Vérification de la première section
-        composeTestRule.onNodeWithText("Le Plateau et l'Orientation").assertIsDisplayed()
+        // Vérification de la présence des 4 onglets
+        composeTestRule.onNodeWithTag("tab_rules_basics").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_rules_captures").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_rules_scores").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_rules_modes").assertIsDisplayed()
 
-        // Défilement et vérification des sections suivantes dans la LazyColumn
+        // Onglet 1 : Règles de base
+        composeTestRule.onNodeWithText("Objectif du jeu").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Le Plateau et ses 30 Cases").assertIsDisplayed()
+
         composeTestRule.onNodeWithTag("rules_lazy_column")
             .performScrollToNode(hasText("Les Pions et le Premier Coup"))
         composeTestRule.onNodeWithText("Les Pions et le Premier Coup").assertIsDisplayed()
@@ -61,6 +72,30 @@ class WaliRulesAndNavigationTest {
         composeTestRule.onNodeWithTag("rules_lazy_column")
             .performScrollToNode(hasText("Phase 2 : Le Déplacement"))
         composeTestRule.onNodeWithText("Phase 2 : Le Déplacement").assertIsDisplayed()
+
+        // Navigation vers Onglet 2 : Captures
+        composeTestRule.onNodeWithTag("tab_rules_captures").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Alignement Valide (Le \"Cheval\")").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("rules_lazy_column")
+            .performScrollToNode(hasText("Alignements de 4 ou 5 Pions : NULS !"))
+        composeTestRule.onNodeWithText("Alignements de 4 ou 5 Pions : NULS !").assertIsDisplayed()
+
+        // Navigation vers Onglet 3 : Scores & Variantes
+        composeTestRule.onNodeWithTag("tab_rules_scores").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Décompte des Points & Victoire Écrasante").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("rules_lazy_column")
+            .performScrollToNode(hasText("Proposition de Match Nul"))
+        composeTestRule.onNodeWithText("Proposition de Match Nul").assertIsDisplayed()
+
+        // Navigation vers Onglet 4 : Modes & En ligne
+        composeTestRule.onNodeWithTag("tab_rules_modes").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Les Modes de Jeu").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("rules_lazy_column")
+            .performScrollToNode(hasText("Mode Spectateur et Chat de Salon"))
+        composeTestRule.onNodeWithText("Mode Spectateur et Chat de Salon").assertIsDisplayed()
 
         // Bouton de retour en haut
         composeTestRule.onNodeWithTag("btn_rules_back").performClick()
@@ -272,6 +307,167 @@ class WaliRulesAndNavigationTest {
 
         // C'est STONES qui a abandonné : STICKS gagne
         assertEquals(Player.STICKS, vm.uiState.value.gameState.winner)
+    }
+
+    @Test
+    fun ruleDiagrams_allIllustratedMovesAreLegalAndProduceStatedEffect() {
+        // -------------------------------------------------------------
+        // 1. SimpleChevalDiagram : déplacement de 9 vers 15 formant [14-15-16]
+        // -------------------------------------------------------------
+        // Numérotation 1..30 :
+        // 9  = Position(1, 2)
+        // 14 = Position(2, 1)
+        // 15 = Position(2, 2)
+        // 16 = Position(2, 3)
+        val pos9 = Position(1, 2)
+        val pos14 = Position(2, 1)
+        val pos15 = Position(2, 2)
+        val pos16 = Position(2, 3)
+
+        val initialBoardSimple = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                pos9, pos14, pos16 -> Player.STICKS
+                Position(0, 0), Position(0, 1), Position(0, 2) -> Player.STONES // Pions adverses capturables
+                else -> null
+            }
+        }
+        val stateSimple = GameState(
+            board = initialBoardSimple,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 3,
+            stonesRemaining = 3,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList()
+        )
+
+        // Adjacence orthogonale : pos9 est adjacent à pos15, pos15 est vide
+        assertTrue((Math.abs(pos9.row - pos15.row) + Math.abs(pos9.col - pos15.col)) == 1)
+        assertEquals(null, stateSimple.board[pos15])
+
+        // Le coup 9 -> 15 est légal
+        val validMovesSimple = WaliEngine.getValidMoves(stateSimple, pos9)
+        assertTrue("Le déplacement 9 -> 15 doit être légal", validMovesSimple.contains(pos15))
+
+        // Exécution du coup
+        val afterSimple = WaliEngine.movePiece(stateSimple, pos9, pos15)
+        assertEquals(null, afterSimple.board[pos9]) // pos9 s'est vidée
+        assertEquals(Player.STICKS, afterSimple.board[pos15]) // pos15 occupée
+
+        // Exactement 1 ligne formée et 1 capture accordée
+        val newLinesSimple = WaliEngine.detectNewLines(stateSimple.board, afterSimple.board, Player.STICKS)
+        assertEquals(1, newLinesSimple.size)
+        assertEquals(setOf(pos14, pos15, pos16), newLinesSimple.first().cells)
+        assertEquals(1, afterSimple.pendingCaptures)
+        assertTrue(WaliEngine.canCapture(afterSimple))
+
+        // -------------------------------------------------------------
+        // 2. DoubleChevalDiagram : déplacement de 9 vers 15 formant [13-14-15] et [15-21-27]
+        // -------------------------------------------------------------
+        // 13 = Position(2, 0)
+        // 14 = Position(2, 1)
+        // 15 = Position(2, 2)
+        // 16 = Position(2, 3) (libre !)
+        // 21 = Position(3, 2)
+        // 27 = Position(4, 2)
+        val pos13 = Position(2, 0)
+        val pos21 = Position(3, 2)
+        val pos27 = Position(4, 2)
+
+        val initialBoardDouble = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                pos9, pos13, pos14, pos21, pos27 -> Player.STICKS
+                Position(0, 0), Position(0, 1), Position(0, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        val stateDouble = GameState(
+            board = initialBoardDouble,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 5,
+            stonesRemaining = 3,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList()
+        )
+
+        // Adjacence et case libre
+        assertTrue((Math.abs(pos9.row - pos15.row) + Math.abs(pos9.col - pos15.col)) == 1)
+        assertEquals(null, stateDouble.board[pos15])
+        assertEquals(null, stateDouble.board[pos16])
+
+        // Coup légal
+        val validMovesDouble = WaliEngine.getValidMoves(stateDouble, pos9)
+        assertTrue("Le déplacement 9 -> 15 doit être légal pour le cheval double", validMovesDouble.contains(pos15))
+
+        // Exécution
+        val afterDouble = WaliEngine.movePiece(stateDouble, pos9, pos15)
+        assertEquals(null, afterDouble.board[pos9])
+        assertEquals(Player.STICKS, afterDouble.board[pos15])
+        assertEquals(null, afterDouble.board[pos16])
+
+        // Deux lignes formées simultanément
+        val newLinesDouble = WaliEngine.detectNewLines(stateDouble.board, afterDouble.board, Player.STICKS)
+        assertEquals(2, newLinesDouble.size)
+        val horizLine = newLinesDouble.firstOrNull { it.cells == setOf(pos13, pos14, pos15) }
+        val vertLine = newLinesDouble.firstOrNull { it.cells == setOf(pos15, pos21, pos27) }
+        assertTrue("Ligne horizontale [13-14-15] formée", horizLine != null)
+        assertTrue("Ligne verticale [15-21-27] formée", vertLine != null)
+
+        // RÈGLE STRICTE WALI : UNE SEULE capture accordée malgré les 2 lignes formées !
+        assertEquals(1, afterDouble.pendingCaptures)
+        assertTrue(WaliEngine.canCapture(afterDouble))
+
+        // -------------------------------------------------------------
+        // 3. UsedLineAndResetDiagram : ligne [8-9-10] cassée en 10->16 puis reformée 16->10
+        // -------------------------------------------------------------
+        // 8  = Position(1, 1)
+        // 9  = Position(1, 2)
+        // 10 = Position(1, 3)
+        // 16 = Position(2, 3)
+        val pos8 = Position(1, 1)
+        val pos10 = Position(1, 3)
+        val line8910 = Line(setOf(pos8, pos9, pos10))
+
+        val boardUsed = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                pos8, pos9, pos10 -> Player.STICKS
+                Position(0, 0), Position(0, 1), Position(0, 2) -> Player.STONES
+                else -> null
+            }
+        }
+        val stateUsed = GameState(
+            board = boardUsed,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 3,
+            stonesRemaining = 3,
+            winner = null,
+            usedLines = setOf(line8910), // Ligne déjà consommée
+            moveHistory = emptyList()
+        )
+
+        // Étape 1 : casser la ligne en déplaçant 10 vers 16
+        assertTrue((Math.abs(pos10.row - pos16.row) + Math.abs(pos10.col - pos16.col)) == 1)
+        val afterBreak = WaliEngine.movePiece(stateUsed, pos10, pos16)
+        assertEquals(null, afterBreak.board[pos10])
+        assertEquals(Player.STICKS, afterBreak.board[pos16])
+        assertEquals(0, afterBreak.pendingCaptures) // Aucune capture car ligne cassée
+        assertFalse("La ligne rompue doit être retirée de usedLines", afterBreak.usedLines.contains(line8910))
+
+        // On simule le coup adverse puis le retour du joueur : déplacement 16 -> 10
+        val stateBeforeReturn = afterBreak.copy(currentPlayer = Player.STICKS)
+        val afterReformed = WaliEngine.movePiece(stateBeforeReturn, pos16, pos10)
+        assertEquals(Player.STICKS, afterReformed.board[pos10])
+        assertEquals(null, afterReformed.board[pos16])
+
+        // La ligne [8-9-10] est reformée et donne à nouveau droit à 1 capture
+        val newLinesReformed = WaliEngine.detectNewLines(stateBeforeReturn.board, afterReformed.board, Player.STICKS)
+        assertEquals(1, newLinesReformed.size)
+        assertEquals(setOf(pos8, pos9, pos10), newLinesReformed.first().cells)
+        assertEquals(1, afterReformed.pendingCaptures)
     }
 }
 

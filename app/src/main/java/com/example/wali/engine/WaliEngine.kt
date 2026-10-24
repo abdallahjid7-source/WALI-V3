@@ -15,11 +15,12 @@ import com.example.wali.model.WaliRuleOptions
  * - 12 Bâtonnets (commence) vs 12 Cailloux (total 24 pions, 6 cases vides après pose)
  * - Phase 1 (Pose) : pose alternée, interdiction absolue de créer une ligne de 3
  * - Phase 2 (Déplacement) : déplacement orthogonal d'une case vers une case vide
- * - Formation de ligne : 3 pions orthogonaux consécutifs (jamais diagonal)
- * - Capture : 1 capture par ligne nouvellement créée
+ * - Formation de ligne : exactement 3 pions orthogonaux consécutifs (jamais diagonal)
+ * - Règle des 4 ou 5 pions : un alignement de 4 ou 5 pions contigus ne constitue pas une ligne valide et ne donne droit à aucune capture
+ * - Capture : 1 seule capture par coup, quel que soit le nombre de lignes formées
  * - Réutilisation : une ligne doit être cassée puis reformée pour recapturer,
  *   mais une autre ligne distincte formée ailleurs capture même si l'ancienne reste intacte
- * - Cheval double : deux lignes créées en un seul coup = 2 captures distinctes
+ * - Cheval double : deux lignes créées en un seul coup = 1 seule capture au total
  * - Victoire / Défaite : par élimination (0 pion) ou par blocage complet (aucun mouvement légal)
  */
 object WaliEngine {
@@ -562,7 +563,7 @@ object WaliEngine {
         val opponentPiecesLeft = newBoard.values.count { it == opponent }
 
         return if (remainingCaptures > 0 && opponentPiecesLeft > 0) {
-            // Encore une capture à effectuer (ex: cheval double)
+            // Sécurité défensive si pendingCaptures était > 1
             state.copy(
                 board = newBoard,
                 sticksRemaining = newSticks,
