@@ -100,8 +100,14 @@ data class OnlineGameSession(
      * Retourne strictement null pour un spectateur.
      */
     fun getPlayerRole(uid: String): Player? {
-        val roleStr = players[uid] ?: if (uid == creatorUid) creatorPlayer.name else if (uid == opponentUid) opponentPlayer?.name else null
-        return roleStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
+        if (uid.isBlank()) return null
+        val fromMap = players[uid]?.let { runCatching { Player.valueOf(it) }.getOrNull() }
+        if (fromMap != null) return fromMap
+        return when (uid) {
+            creatorUid -> creatorPlayer
+            opponentUid -> opponentPlayer ?: creatorPlayer.opponent
+            else -> null
+        }
     }
 
     /**

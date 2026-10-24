@@ -39,7 +39,11 @@ object WaliEngine {
             usedLines = emptySet(),
             moveHistory = emptyList(),
             pendingCaptures = 0,
-            ruleOptions = ruleOptions
+            sticksPendingPlacement = 0,
+            stonesPendingPlacement = 0,
+            ruleOptions = ruleOptions,
+            capturedBySticks = 0,
+            capturedByStones = 0
         )
     }
 
@@ -481,6 +485,8 @@ object WaliEngine {
         val newBoard = state.board + (targetPosition to null)
         val newSticks = if (opponent == Player.STICKS) state.sticksRemaining - 1 else state.sticksRemaining
         val newStones = if (opponent == Player.STONES) state.stonesRemaining - 1 else state.stonesRemaining
+        val newCapturedBySticks = if (player == Player.STICKS) state.capturedBySticks + 1 else state.capturedBySticks
+        val newCapturedByStones = if (player == Player.STONES) state.capturedByStones + 1 else state.capturedByStones
 
         // Si le pion adverse capturé faisait partie d'une ligne adverse enregistrée comme used, elle est maintenant cassée
         val allValidLines = (detectLines(newBoard, Player.STICKS) + detectLines(newBoard, Player.STONES)).toSet()
@@ -498,6 +504,8 @@ object WaliEngine {
                 board = newBoard,
                 sticksRemaining = newSticks,
                 stonesRemaining = newStones,
+                capturedBySticks = newCapturedBySticks,
+                capturedByStones = newCapturedByStones,
                 usedLines = updatedUsedLines,
                 moveHistory = updatedHistory,
                 pendingCaptures = minOf(remainingCaptures, opponentPiecesLeft)
@@ -511,6 +519,8 @@ object WaliEngine {
                     board = newBoard,
                     sticksRemaining = newSticks,
                     stonesRemaining = newStones,
+                    capturedBySticks = newCapturedBySticks,
+                    capturedByStones = newCapturedByStones,
                     winner = player,
                     phase = Phase.GAME_OVER,
                     usedLines = updatedUsedLines,
@@ -524,6 +534,8 @@ object WaliEngine {
                     currentPlayer = opponent,
                     sticksRemaining = newSticks,
                     stonesRemaining = newStones,
+                    capturedBySticks = newCapturedBySticks,
+                    capturedByStones = newCapturedByStones,
                     usedLines = updatedUsedLines,
                     moveHistory = updatedHistory,
                     pendingCaptures = 0

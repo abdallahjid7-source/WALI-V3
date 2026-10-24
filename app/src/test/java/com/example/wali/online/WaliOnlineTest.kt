@@ -916,7 +916,9 @@ class WaliOnlineTest {
             phase = Phase.GAME_OVER,
             winner = Player.STONES,
             sticksRemaining = 0,
-            stonesRemaining = 0
+            stonesRemaining = 0,
+            capturedBySticks = 12,
+            capturedByStones = 12
         )
         flow.value = flow.value!!.copy(
             status = OnlineGameStatus.FINISHED,
@@ -1707,6 +1709,8 @@ class WaliOnlineTest {
         currentPlayer: Player = Player.STICKS,
         sticksRemaining: Int = 10,
         stonesRemaining: Int = 10,
+        capturedBySticks: Int = (Position.PIECES_PER_PLAYER - stonesRemaining).coerceAtLeast(0),
+        capturedByStones: Int = (Position.PIECES_PER_PLAYER - sticksRemaining).coerceAtLeast(0),
         moveHistory: List<String> = listOf("A1", "B1", "A2", "B2")
     ): GameState {
         val board = Position.allPositions.associateWith<Position, Player?> { null }.toMutableMap()
@@ -1725,7 +1729,9 @@ class WaliOnlineTest {
             stonesRemaining = stonesRemaining,
             winner = null,
             usedLines = emptySet(),
-            moveHistory = moveHistory
+            moveHistory = moveHistory,
+            capturedBySticks = capturedBySticks,
+            capturedByStones = capturedByStones
         )
     }
 
@@ -2667,5 +2673,177 @@ class WaliOnlineTest {
         // Et local_user_42 ne peut jamais accepter lui-même l'offre en cours
         assertTrue(fakeRepo.respondToDraw(code, accept = true, uid = "local_user_42").isFailure)
         assertEquals(OnlineGameStatus.ONGOING, flow.value!!.status)
+    }
+
+    @Test
+    fun onlineSession_missingCreatorOrOpponentPlayer_isHandledCleanlyWithoutBlocking() = runOnlineTest {
+        // 1. Vérifie que WaliEngine.capturePiece incrémente explicitement capturedBySticks / capturedByStones
+        // et que la sérialisation/désérialisation rétrocompatible charge à 0 si les champs sont absents
+        val baseMovement = createMovementGameState(
+            currentPlayer = Player.STICKS,
+            sticksRemaining = 12,
+            stonesRemaining = 12,
+            capturedBySticks = 0,
+            capturedByStones = 0
+        ).copy(pendingCaptures = 1)
+
+        val afterSticksCapture = WaliEngine.capturePiece(baseMovement, Position(4, 5))
+        assertEquals(1, afterSticksCapture.capturedBySticks)
+        assertEquals(0, afterSticksCapture.capturedByStones)
+        assertEquals(1, afterSticksCapture.capturesMadeBy(Player.STICKS))
+        assertEquals(0, afterSticksCapture.capturesMadeBy(Player.STONES))
+
+        val serialized = com.example.wali.storage.WaliGameSerializer.serializeGameState(afterSticksCapture)
+        val roundTrip = com.example.wali.storage.WaliGameSerializer.deserializeGameState(serialized)!!
+        assertEquals(1, roundTrip.capturedBySticks)
+        assertEquals(0, roundTrip.capturedByStones)
+
+        val legacyJson = org.json.JSONObject(serialized).apply {
+            getJSONObject("gameState").apply {
+                remove("capturedBySticks")
+                remove("capturedByStones")
+            }
+        }.toString()
+        val deserializedLegacy = com.example.wali.storage.WaliGameSerializer.deserializeGameState(legacyJson)!!
+        assertEquals(0, deserializedLegacy.capturedBySticks)
+        assertEquals(0, deserializedLegacy.capturedByStones)
+
+        // 2. Partie en ligne dont le document/session ne contient ni opponentPlayer ni entrées dans players :
+        // les deux joueurs doivent pouvoir résoudre leur camp, jouer leurs coups et proposer/répondre au match nul sans blocage
+        val code = "NOPLYR"
+        val now = System.currentTimeMillis()
+        val incompletePlayerFieldsSession = OnlineGameSession(
+            code = code,
+            spectatorCode = "SNOPLYR",
+            isPublic = true,
+            status = OnlineGameStatus.ONGOING,
+            creatorUid = "creator_1",
+            creatorPlayer = Player.STICKS,
+            opponentUid = "local_user_42",
+            opponentPlayer = null,
+            players = emptyMap(),
+            gameState = WaliEngine.initializeGame().copy(currentPlayer = Player.STONES),
+            lastMoveAt = now,
+            createdAt = now,
+            statsByUid = mapOf("creator_1" to 0, "local_user_42" to 0)
+        )
+        fakeRepo.games[code] = MutableStateFlow(incompletePlayerFieldsSession)
+
+        // Le joueur local est l'adversaire ("local_user_42") et opponentPlayer est null dans la session :
+        // getPlayerRole doit résoudre Player.STONES (creatorPlayer.opponent) sans retourner null
+        assertEquals(Player.STICKS, incompletePlayerFieldsSession.getPlayerRole("creator_1"))
+        assertEquals(Player.STONES, incompletePlayerFieldsSession.getPlayerRole("local_user_42"))
+        assertTrue(incompletePlayerFieldsSession.isPlayerTurn("local_user_42"))
+        assertFalse(incompletePlayerFieldsSession.isPlayerTurn("creator_1"))
+
+        // Reprise de la partie par "local_user_42" (opponent) et exécution d'un coup sur le plateau sans blocage
+        viewModel.onAppForegrounded()
+        testScheduler.runCurrent()
+        viewModel.resumePendingOnlineGame()
+        testScheduler.runCurrent()
+
+        assertEquals(Player.STONES, viewModel.uiState.value.localPlayerRole)
+        val targetPos = Position(1, 1)
+        viewModel.onCellClicked(targetPos)
+        testScheduler.runCurrent()
+
+        assertEquals(Player.STONES, fakeRepo.games[code]!!.value!!.gameState.board[targetPos])
+        assertEquals(Player.STICKS, fakeRepo.games[code]!!.value!!.gameState.currentPlayer)
+
+        // Même avec opponentPlayer == null et players vide, proposeDraw et respondToDraw fonctionnent sans blocage
+        fakeRepo.games[code]!!.value = fakeRepo.games[code]!!.value!!.copy(
+            opponentPlayer = null,
+            players = emptyMap(),
+            gameState = createMovementGameState(currentPlayer = Player.STICKS)
+        )
+        testScheduler.runCurrent()
+
+        assertTrue(fakeRepo.proposeDraw(code, "creator_1").isSuccess)
+        assertTrue(fakeRepo.respondToDraw(code, accept = false, uid = "local_user_42").isSuccess)
+        assertNull(fakeRepo.games[code]!!.value!!.drawOfferedBy)
+        assertEquals(Player.STICKS, fakeRepo.games[code]!!.value!!.gameState.currentPlayer)
+    }
+
+    @Test
+    fun rematch_resetsCaptureCountersToZero() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+
+        // 1re partie en ligne : chaque joueur effectue de vraies captures via WaliEngine.capturePiece
+        val stateBeforeSticksCapture = createMovementGameState(
+            currentPlayer = Player.STICKS,
+            sticksRemaining = 12,
+            stonesRemaining = 12,
+            capturedBySticks = 0,
+            capturedByStones = 0
+        ).copy(
+            pendingCaptures = 1,
+            usedLines = setOf(com.example.wali.model.Line(setOf(Position(0, 0), Position(0, 1), Position(0, 2))))
+        )
+        val afterSticksCapture = WaliEngine.capturePiece(stateBeforeSticksCapture, Position(4, 5))
+        assertEquals(1, afterSticksCapture.capturedBySticks)
+
+        val stateBeforeStonesCapture = afterSticksCapture.copy(
+            currentPlayer = Player.STONES,
+            pendingCaptures = 1
+        )
+        val afterStonesCapture = WaliEngine.capturePiece(stateBeforeStonesCapture, Position(0, 0))
+        assertEquals(1, afterStonesCapture.capturedBySticks)
+        assertEquals(1, afterStonesCapture.capturedByStones)
+
+        // Fin de la manche 1 avec compteurs > 0, usedLines non vide, moveHistory non vide et drawOfferTurnCount > 0
+        val finishedRound1 = afterStonesCapture.copy(
+            phase = Phase.GAME_OVER,
+            winner = Player.STICKS
+        )
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            statsByUid = mapOf("local_user_42" to 0, "opponent_99" to 0),
+            drawOfferTurnCount = 4
+        )
+        fakeRepo.updateGameState(code, finishedRound1)
+        testScheduler.runCurrent()
+
+        assertEquals(OnlineGameStatus.FINISHED, flow.value!!.status)
+        assertEquals(1, flow.value!!.gameState.capturedBySticks)
+        assertEquals(1, flow.value!!.gameState.capturedByStones)
+        // Les deux joueurs avaient capturé >= 1 pion -> victoire classique (+1 point)
+        assertEquals(1, flow.value!!.statsByUid["local_user_42"])
+
+        // Les deux joueurs acceptent la revanche
+        viewModel.requestOnlineRematch()
+        fakeRepo.requestRematchAsUser(code, "opponent_99")
+        testScheduler.runCurrent()
+
+        // Vérifie que la manche 2 repart avec capturedBySticks == 0, capturedByStones == 0 et tous les états transitoires remis à zéro
+        val rematchSession = flow.value!!
+        val rematchState = rematchSession.gameState
+        assertEquals(OnlineGameStatus.ONGOING, rematchSession.status)
+        assertEquals(2, rematchSession.gamesPlayed)
+        assertEquals(Phase.PLACEMENT, rematchState.phase)
+        assertEquals(0, rematchState.capturedBySticks)
+        assertEquals(0, rematchState.capturedByStones)
+        assertEquals(0, rematchState.capturesMadeBy(Player.STICKS))
+        assertEquals(0, rematchState.capturesMadeBy(Player.STONES))
+        assertEquals(0, rematchState.pendingCaptures)
+        assertEquals(0, rematchState.sticksPendingPlacement)
+        assertEquals(0, rematchState.stonesPendingPlacement)
+        assertTrue(rematchState.moveHistory.isEmpty())
+        assertTrue(rematchState.usedLines.isEmpty())
+        assertNull(rematchSession.drawOfferedBy)
+        assertEquals(-1, rematchSession.drawOfferTurnCount)
+
+        val uiGameState = viewModel.uiState.value.gameState
+        assertEquals(0, uiGameState.capturedBySticks)
+        assertEquals(0, uiGameState.capturedByStones)
+        assertNull(viewModel.uiState.value.localDrawOfferedBy)
+        assertEquals(-1, viewModel.uiState.value.localDrawOfferTurnCount)
+        assertNull(viewModel.uiState.value.localLastDrawProposer)
     }
 }

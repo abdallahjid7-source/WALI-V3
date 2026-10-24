@@ -218,6 +218,7 @@ class FirestoreWaliOnlineRepository(
                     docRef,
                     mapOf(
                         FIELD_STATUS to OnlineGameStatus.ONGOING.value,
+                        FIELD_CREATOR_PLAYER to creatorPlayer.name,
                         FIELD_OPPONENT_UID to uid,
                         FIELD_OPPONENT_PLAYER to opponentPlayer.name,
                         FIELD_PLAYERS to updatedPlayers,
@@ -787,11 +788,7 @@ class FirestoreWaliOnlineRepository(
         val isPublic = doc.getBoolean(FIELD_IS_PUBLIC) ?: false
         val status = OnlineGameStatus.fromValue(doc.getString(FIELD_STATUS))
         val creatorUid = doc.getString(FIELD_CREATOR_UID) ?: return null
-        val creatorPlayerStr = doc.getString(FIELD_CREATOR_PLAYER) ?: Player.STICKS.name
-        val creatorPlayer = runCatching { Player.valueOf(creatorPlayerStr) }.getOrDefault(Player.STICKS)
         val opponentUid = doc.getString(FIELD_OPPONENT_UID)
-        val opponentPlayerStr = doc.getString(FIELD_OPPONENT_PLAYER)
-        val opponentPlayer = opponentPlayerStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
 
         val playersMap = mutableMapOf<String, String>()
         val rawPlayers = doc.get(FIELD_PLAYERS)
@@ -802,6 +799,18 @@ class FirestoreWaliOnlineRepository(
                 }
             }
         }
+
+        val creatorPlayerStr = doc.getString(FIELD_CREATOR_PLAYER)
+            ?.takeIf { it.isNotBlank() }
+            ?: playersMap[creatorUid]
+            ?: Player.STICKS.name
+        val creatorPlayer = runCatching { Player.valueOf(creatorPlayerStr) }.getOrDefault(Player.STICKS)
+
+        val opponentPlayerStr = doc.getString(FIELD_OPPONENT_PLAYER)
+            ?.takeIf { it.isNotBlank() }
+            ?: opponentUid?.let { playersMap[it] }
+        val opponentPlayer = opponentPlayerStr?.let { runCatching { Player.valueOf(it) }.getOrNull() }
+            ?: if (!opponentUid.isNullOrBlank() || status != OnlineGameStatus.WAITING) creatorPlayer.opponent else null
 
         val stateJson = doc.getString(FIELD_GAME_STATE_JSON)
         val gameState = WaliGameSerializer.deserializeGameState(stateJson) ?: return null

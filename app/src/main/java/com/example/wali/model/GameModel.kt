@@ -112,7 +112,9 @@ data class GameState(
     val pendingCaptures: Int = 0,
     val sticksPendingPlacement: Int = 0,
     val stonesPendingPlacement: Int = 0,
-    val ruleOptions: WaliRuleOptions = WaliRuleOptions()
+    val ruleOptions: WaliRuleOptions = WaliRuleOptions(),
+    val capturedBySticks: Int = 0,
+    val capturedByStones: Int = 0
 ) {
     /**
      * Nombre de pions d'un joueur actuellement présents sur le plateau.
@@ -134,25 +136,11 @@ data class GameState(
 
     /**
      * Retourne le nombre de pions vivants restants pour [player].
-     * En phase PLACEMENT (ou si la partie s'est terminée en GAME_OVER pendant la phase de pose,
-     * avant toute transition vers la phase de déplacement), aucune capture n'étant possible,
-     * chaque joueur possède encore ses 12 pions.
-     * En phases MOVEMENT et GAME_OVER après le début des déplacements, retourne [sticksRemaining] ou [stonesRemaining].
+     * En phase PLACEMENT, aucune capture n'étant possible, chaque joueur possède ses 12 pions.
+     * En phases MOVEMENT et GAME_OVER, retourne [sticksRemaining] ou [stonesRemaining].
      */
     fun remainingPiecesOf(player: Player): Int {
         if (phase == Phase.PLACEMENT) {
-            return Position.PIECES_PER_PLAYER
-        }
-        if (phase == Phase.GAME_OVER &&
-            moveHistory.any { it.contains(" posé en ") } &&
-            moveHistory.none {
-                it.contains("Début des déplacements") ||
-                    it.contains("Début anticipé des déplacements") ||
-                    it.contains("->") ||
-                    it.contains("capturé") ||
-                    it.contains("pion en attente en")
-            }
-        ) {
             return Position.PIECES_PER_PLAYER
         }
         return when (player) {
@@ -162,11 +150,13 @@ data class GameState(
     }
 
     /**
-     * Retourne le nombre de captures réalisées par [player] depuis le début de la partie :
-     * 12 - remainingPiecesOf(player.opponent).
+     * Retourne le nombre de captures réalisées par [player] depuis le début de la partie,
+     * à partir des compteurs explicites [capturedBySticks] et [capturedByStones].
      */
-    fun capturesMadeBy(player: Player): Int =
-        (Position.PIECES_PER_PLAYER - remainingPiecesOf(player.opponent)).coerceAtLeast(0)
+    fun capturesMadeBy(player: Player): Int = when (player) {
+        Player.STICKS -> capturedBySticks
+        Player.STONES -> capturedByStones
+    }
 
     /**
      * Indique si la victoire de [winnerRole] est une victoire double (+2 points),

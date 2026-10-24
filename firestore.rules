@@ -40,9 +40,13 @@ service cloud.firestore {
          && request.resource.data.opponentUid == resource.data.opponentUid
          && request.auth != null
          && ((request.auth.uid == resource.data.creatorUid
-              && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.creatorPlayer + '".*'))
+              && resource.data.get('creatorPlayer', '') is string
+              && resource.data.get('creatorPlayer', '') != ''
+              && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.get('creatorPlayer', '') + '".*'))
              || (request.auth.uid == resource.data.opponentUid
-                 && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.opponentPlayer + '".*')))
+                 && resource.data.get('opponentPlayer', '') is string
+                 && resource.data.get('opponentPlayer', '') != ''
+                 && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.get('opponentPlayer', '') + '".*')))
          && ((resource.data.get('drawOfferedBy', null) == null
               && (request.resource.data.get('drawOfferedBy', null) == null
                   || request.resource.data.drawOfferedBy == request.auth.uid))

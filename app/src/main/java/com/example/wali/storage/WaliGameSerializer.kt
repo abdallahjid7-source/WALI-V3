@@ -47,6 +47,8 @@ object WaliGameSerializer {
     private const val KEY_STONES_PENDING_PLACEMENT = "stonesPendingPlacement"
     private const val KEY_MANDATORY_ALIGNMENT = "mandatoryAlignment"
     private const val KEY_DEFEAT_AT_TWO_PIECES = "defeatAtTwoPieces"
+    private const val KEY_CAPTURED_BY_STICKS = "capturedBySticks"
+    private const val KEY_CAPTURED_BY_STONES = "capturedByStones"
 
     /**
      * Sérialise un [GameState] brut en chaîne JSON formatée (mode en ligne).
@@ -126,6 +128,8 @@ object WaliGameSerializer {
         stateObj.put(KEY_STONES_PENDING_PLACEMENT, gs.stonesPendingPlacement)
         stateObj.put(KEY_MANDATORY_ALIGNMENT, gs.ruleOptions.mandatoryAlignment)
         stateObj.put(KEY_DEFEAT_AT_TWO_PIECES, gs.ruleOptions.defeatAtTwoPieces)
+        stateObj.put(KEY_CAPTURED_BY_STICKS, gs.capturedBySticks)
+        stateObj.put(KEY_CAPTURED_BY_STONES, gs.capturedByStones)
 
         root.put(KEY_GAME_STATE, stateObj)
         return root.toString()
@@ -234,6 +238,9 @@ object WaliGameSerializer {
                 false
             }
 
+            val capturedBySticks = stateObj.optInt(KEY_CAPTURED_BY_STICKS, 0).coerceAtLeast(0)
+            val capturedByStones = stateObj.optInt(KEY_CAPTURED_BY_STONES, 0).coerceAtLeast(0)
+
             val gameState = GameState(
                 board = boardMap,
                 currentPlayer = currentPlayer,
@@ -249,7 +256,9 @@ object WaliGameSerializer {
                 ruleOptions = WaliRuleOptions(
                     mandatoryAlignment = mandatoryAlignment,
                     defeatAtTwoPieces = defeatAtTwoPieces
-                )
+                ),
+                capturedBySticks = capturedBySticks,
+                capturedByStones = capturedByStones
             )
 
             SavedGame(
