@@ -61,8 +61,11 @@ import com.example.wali.ai.AiDifficulty
 import com.example.wali.ads.WaliAdManager
 import com.example.wali.model.GameMode
 import com.example.wali.model.Phase
+import com.example.wali.model.Player
 import com.example.wali.online.OnlineGameStatus
 import com.example.wali.ui.components.DrawProposalDialog
+import com.example.wali.ui.components.FaceToFaceCenterStatusStrip
+import com.example.wali.ui.components.FaceToFacePlayerPanel
 import com.example.wali.ui.components.ForfeitConfirmDialog
 import com.example.wali.ui.components.ModeSelectionDialog
 import com.example.wali.ui.components.PauseMenuOverlay
@@ -311,7 +314,7 @@ fun WaliGameScreen(
                         )
                     }
 
-                    if (uiState.canDeclareForfeit) {
+                    if (uiState.canDeclareForfeit && uiState.gameMode != GameMode.TWO_PLAYERS) {
                         IconButton(
                             onClick = { viewModel.requestForfeit() },
                             modifier = Modifier
@@ -361,7 +364,95 @@ fun WaliGameScreen(
             val totalHeight = maxHeight
             val isLandscape = totalWidth > totalHeight
 
-            if (isLandscape) {
+            if (uiState.gameMode == GameMode.TWO_PLAYERS) {
+                // --- DISPOSITION FACE-À-FACE EN MODE LOCAL 2 JOUEURS (PARTIE H) ---
+                val isCompactPanel = totalHeight < 680.dp
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("two_players_face_to_face_layout"),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    // Panneau du HAUT : Joueur BÂTONNETS (STICKS) pivoté à 180° pour le joueur d'en face
+                    FaceToFacePlayerPanel(
+                        player = Player.STICKS,
+                        gameState = uiState.gameState,
+                        isRotated180 = true,
+                        isTimerEnabled = uiState.isTimerEnabled,
+                        timerRemainingSeconds = uiState.timerRemainingSeconds,
+                        timerDurationSeconds = uiState.timerDurationSeconds,
+                        isTimerPaused = uiState.isTimerPaused,
+                        canForfeit = uiState.canDeclareForfeit,
+                        canProposeDraw = uiState.canPlayerProposeDraw(Player.STICKS),
+                        isWaitingForDrawResponse = uiState.isPlayerWaitingForDrawResponse(Player.STICKS),
+                        isDrawOfferedToThisPlayer = uiState.isDrawOfferedToPlayer(Player.STICKS),
+                        isConfirmingForfeitForThisPlayer = uiState.showForfeitConfirmation && uiState.pendingForfeitPlayer == Player.STICKS,
+                        onRequestForfeit = { viewModel.requestForfeit(Player.STICKS) },
+                        onConfirmForfeit = { viewModel.confirmForfeit(Player.STICKS) },
+                        onDismissForfeit = { viewModel.dismissForfeitConfirmation() },
+                        onProposeDraw = { viewModel.proposeDraw(Player.STICKS) },
+                        onAcceptDraw = { viewModel.respondToDraw(true, Player.STICKS) },
+                        onRefuseDraw = { viewModel.respondToDraw(false, Player.STICKS) },
+                        isCompact = isCompactPanel,
+                        modifier = Modifier.widthIn(max = 620.dp)
+                    )
+
+                    // Bandeau central compact d'état (phase, durée, message) + Plateau 5x6 partagé non pivoté
+                    FaceToFaceCenterStatusStrip(
+                        gameState = uiState.gameState,
+                        gameDurationSeconds = uiState.gameDurationSeconds,
+                        feedbackMessage = uiState.feedbackMessage,
+                        isCompact = isCompactPanel,
+                        modifier = Modifier.widthIn(max = 620.dp)
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .widthIn(max = 620.dp)
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        WaliBoardView(
+                            board = uiState.gameState.board,
+                            selectedPosition = uiState.selectedPosition,
+                            highlightedMoves = uiState.highlightedMoves,
+                            capturablePositions = uiState.capturablePositions,
+                            onCellClicked = { pos -> viewModel.onCellClicked(pos) },
+                            lastMove = uiState.lastMove,
+                            showCellNumbers = uiState.isCellNumbersEnabled,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    // Panneau du BAS : Joueur CAILLOUX (STONES) dans le sens normal (0°)
+                    FaceToFacePlayerPanel(
+                        player = Player.STONES,
+                        gameState = uiState.gameState,
+                        isRotated180 = false,
+                        isTimerEnabled = uiState.isTimerEnabled,
+                        timerRemainingSeconds = uiState.timerRemainingSeconds,
+                        timerDurationSeconds = uiState.timerDurationSeconds,
+                        isTimerPaused = uiState.isTimerPaused,
+                        canForfeit = uiState.canDeclareForfeit,
+                        canProposeDraw = uiState.canPlayerProposeDraw(Player.STONES),
+                        isWaitingForDrawResponse = uiState.isPlayerWaitingForDrawResponse(Player.STONES),
+                        isDrawOfferedToThisPlayer = uiState.isDrawOfferedToPlayer(Player.STONES),
+                        isConfirmingForfeitForThisPlayer = uiState.showForfeitConfirmation && uiState.pendingForfeitPlayer == Player.STONES,
+                        onRequestForfeit = { viewModel.requestForfeit(Player.STONES) },
+                        onConfirmForfeit = { viewModel.confirmForfeit(Player.STONES) },
+                        onDismissForfeit = { viewModel.dismissForfeitConfirmation() },
+                        onProposeDraw = { viewModel.proposeDraw(Player.STONES) },
+                        onAcceptDraw = { viewModel.respondToDraw(true, Player.STONES) },
+                        onRefuseDraw = { viewModel.respondToDraw(false, Player.STONES) },
+                        isCompact = isCompactPanel,
+                        modifier = Modifier.widthIn(max = 620.dp)
+                    )
+                }
+            } else if (isLandscape) {
                 // --- DISPOSITION PAYSAGE (DOUBLE PANNEAU ADAPTATIF) ---
                 Row(
                     modifier = Modifier.fillMaxSize(),
@@ -805,17 +896,19 @@ fun WaliGameScreen(
             )
         }
 
-        if (!isAdActive && uiState.isDrawOfferedToMe) {
+        if (!isAdActive && uiState.isDrawOfferedToMe && uiState.gameMode != GameMode.TWO_PLAYERS) {
             DrawProposalDialog(
                 onAccept = { viewModel.acceptDraw() },
                 onRefuse = { viewModel.refuseDraw() }
             )
         }
 
-        if (!isAdActive && uiState.showForfeitConfirmation) {
+        if (!isAdActive && uiState.showForfeitConfirmation && uiState.gameMode != GameMode.TWO_PLAYERS) {
             ForfeitConfirmDialog(
                 onConfirm = { viewModel.confirmForfeit() },
-                onDismiss = { viewModel.dismissForfeitConfirmation() }
+                onDismiss = { viewModel.dismissForfeitConfirmation() },
+                forfeitingPlayer = uiState.pendingForfeitPlayer,
+                isRotated180 = false
             )
         }
 
@@ -825,7 +918,7 @@ fun WaliGameScreen(
                 onRestart = { viewModel.restartCurrentGame() },
                 onMainMenu = { viewModel.returnToMainMenu() },
                 onScoreboard = onOpenScoreboard,
-                onForfeit = if (uiState.canDeclareForfeit) { { viewModel.requestForfeit() } } else null,
+                onForfeit = if (uiState.canDeclareForfeit && uiState.gameMode != GameMode.TWO_PLAYERS) { { viewModel.requestForfeit() } } else null,
                 onDismiss = { viewModel.resumeGame() }
             )
         }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,20 +19,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -586,3 +594,519 @@ fun TurnTimerIndicator(
         )
     }
 }
+
+/**
+ * Panneau dédié à un joueur en mode local 2 joueurs (face-à-face).
+ * - Pour [Player.STICKS] (en haut de l'écran), [isRotated180] = true pivote l'ensemble du panneau
+ *   (titre, compteurs, indicateur de tour, boutons d'action dédiés et boîtes de confirmation/réponse)
+ *   à 180° via [Modifier.graphicsLayer] afin d'être lisible et cliquable par le joueur assis en face.
+ * - Pour [Player.STONES] (en bas de l'écran), [isRotated180] = false conserve l'orientation normale.
+ */
+@Composable
+fun FaceToFacePlayerPanel(
+    player: Player,
+    gameState: GameState,
+    isRotated180: Boolean,
+    isTimerEnabled: Boolean,
+    timerRemainingSeconds: Int,
+    timerDurationSeconds: Int,
+    isTimerPaused: Boolean,
+    canForfeit: Boolean,
+    canProposeDraw: Boolean,
+    isWaitingForDrawResponse: Boolean,
+    isDrawOfferedToThisPlayer: Boolean,
+    isConfirmingForfeitForThisPlayer: Boolean,
+    onRequestForfeit: () -> Unit,
+    onConfirmForfeit: () -> Unit,
+    onDismissForfeit: () -> Unit,
+    onProposeDraw: () -> Unit,
+    onAcceptDraw: () -> Unit,
+    onRefuseDraw: () -> Unit,
+    isCompact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val waliColors = LocalWaliColors.current
+    val tagSuffix = player.name.lowercase()
+    val isActive = gameState.currentPlayer == player && gameState.phase != Phase.GAME_OVER
+    val campTitle = if (player == Player.STICKS) "BÂTONNETS" else "CAILLOUX"
+    val campDisplayName = if (player == Player.STICKS) "Bâtonnets" else "Cailloux"
+    val opponentDisplayName = if (player == Player.STICKS) "Cailloux" else "Bâtonnets"
+
+    val remaining = if (player == Player.STICKS) gameState.sticksRemaining else gameState.stonesRemaining
+    val piecesOnBoard = gameState.piecesOnBoard(player)
+    val pendingCount = if (player == Player.STICKS) gameState.sticksPendingPlacement else gameState.stonesPendingPlacement
+    val capturedCount = gameState.capturesMadeBy(player)
+
+    val borderColor = if (isActive) waliColors.accentGold else waliColors.accentEarth.copy(alpha = 0.25f)
+    val backgroundColor = if (isActive) waliColors.surface else waliColors.surface.copy(alpha = 0.68f)
+
+    val isCaptureActive = isActive && WaliEngine.canCapture(gameState)
+    val isPlacementRequired = isActive && WaliEngine.isPlacementRequired(gameState)
+
+    val turnBadgeText = when {
+        gameState.phase == Phase.GAME_OVER -> "Partie terminée"
+        isCaptureActive -> "★ Capturez 1 pion !"
+        isPlacementRequired -> "★ Pose obligatoire !"
+        isActive -> "À votre tour"
+        else -> "En attente"
+    }
+
+    val turnBadgeColor = when {
+        isCaptureActive -> waliColors.captureAccent
+        isPlacementRequired -> waliColors.accentGold
+        isActive && player == Player.STICKS -> waliColors.accentEarth
+        isActive -> waliColors.boardBorder
+        else -> waliColors.surfaceAlt
+    }
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer(rotationZ = if (isRotated180) 180f else 0f)
+            .testTag("player_panel_$tagSuffix")
+            .border(
+                width = if (isActive) 2.5.dp else 1.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(14.dp)
+            ),
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isActive) 3.dp else 0.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = if (isCompact) 8.dp else 12.dp, vertical = if (isCompact) 4.dp else 6.dp)
+                .testTag("score_card_$tagSuffix"),
+            verticalArrangement = Arrangement.spacedBy(if (isCompact) 3.dp else 5.dp)
+        ) {
+            // Ligne 1 : Identité du camp + Indicateur de tour + Minuteur du joueur actif
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(if (isCompact) 14.dp else 16.dp)
+                            .clip(CircleShape)
+                            .background(if (player == Player.STICKS) waliColors.stickGradientMiddle else waliColors.stoneGradientMid)
+                    )
+                    Text(
+                        text = campTitle,
+                        style = (if (isCompact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall).copy(
+                            fontWeight = FontWeight.Bold,
+                            color = waliColors.textPrimary
+                        )
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(turnBadgeColor)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                            .testTag("turn_badge_$tagSuffix")
+                    ) {
+                        Text(
+                            text = turnBadgeText,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = if (isActive) Color.White else waliColors.textSecondary
+                            )
+                        )
+                    }
+
+                    if (isActive && isTimerEnabled) {
+                        TurnTimerIndicator(
+                            remainingSeconds = timerRemainingSeconds,
+                            totalSeconds = timerDurationSeconds,
+                            isPaused = isTimerPaused
+                        )
+                    }
+                }
+            }
+
+            // Ligne 2 : Réserve / Pions sur le plateau + Compteur de pions adverses capturés
+            val reserveText = when (gameState.phase) {
+                Phase.PLACEMENT -> "À poser : $remaining"
+                Phase.MOVEMENT, Phase.GAME_OVER -> {
+                    if (pendingCount > 0) "Pions : $piecesOnBoard (+$pendingCount)"
+                    else "Pions : $piecesOnBoard"
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = reserveText,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isActive) waliColors.textPrimary else waliColors.textSecondary
+                    ),
+                    modifier = Modifier.testTag("reserve_count_$tagSuffix")
+                )
+
+                Text(
+                    text = "Capturés : $capturedCount",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = waliColors.accentGold
+                    ),
+                    modifier = Modifier.testTag("captured_count_$tagSuffix")
+                )
+            }
+
+            // Ligne 3 : Boîte de confirmation d'abandon, boîte de réponse au match nul, ou boutons d'action dédiés
+            if (isConfirmingForfeitForThisPlayer) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("forfeit_confirm_$tagSuffix"),
+                    colors = CardDefaults.cardColors(containerColor = waliColors.surfaceAlt),
+                    shape = RoundedCornerShape(10.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = SolidColor(MaterialTheme.colorScheme.error.copy(alpha = 0.6f))
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "$campDisplayName, voulez-vous vraiment abandonner ?",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = waliColors.textPrimary
+                            ),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.testTag("forfeit_confirm_text_$tagSuffix")
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(
+                                onClick = onDismissForfeit,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .testTag("btn_cancel_forfeit_$tagSuffix")
+                            ) {
+                                Text(
+                                    text = "Annuler",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = waliColors.textSecondary
+                                    )
+                                )
+                            }
+                            Button(
+                                onClick = onConfirmForfeit,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .testTag("btn_confirm_forfeit_$tagSuffix")
+                            ) {
+                                Text(
+                                    text = "Abandonner",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (isDrawOfferedToThisPlayer) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("draw_offer_box_$tagSuffix"),
+                    colors = CardDefaults.cardColors(containerColor = waliColors.surfaceAlt),
+                    shape = RoundedCornerShape(10.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = SolidColor(waliColors.accentGold)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "$opponentDisplayName propose un match nul. Accepter ou Refuser ?",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = waliColors.textPrimary
+                            ),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.testTag("draw_offer_text_$tagSuffix")
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = onRefuseDraw,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .testTag("btn_refuse_draw_$tagSuffix")
+                            ) {
+                                Text(
+                                    text = "Refuser",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = waliColors.textPrimary
+                                    )
+                                )
+                            }
+                            Button(
+                                onClick = onAcceptDraw,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = waliColors.accentEarth,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .testTag("btn_accept_draw_$tagSuffix")
+                            ) {
+                                Text(
+                                    text = "Accepter",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (gameState.phase != Phase.GAME_OVER) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    OutlinedButton(
+                        onClick = onRequestForfeit,
+                        enabled = canForfeit,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier
+                            .height(if (isCompact) 30.dp else 32.dp)
+                            .testTag("btn_forfeit_$tagSuffix")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Flag,
+                            contentDescription = "Abandonner ($campDisplayName)",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Abandonner",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        )
+                    }
+
+                    if (isWaitingForDrawResponse) {
+                        Text(
+                            text = "Proposition de nul en attente…",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = waliColors.accentGold
+                            ),
+                            modifier = Modifier.testTag("waiting_for_draw_$tagSuffix")
+                        )
+                    } else if (gameState.phase == Phase.MOVEMENT) {
+                        OutlinedButton(
+                            onClick = onProposeDraw,
+                            enabled = canProposeDraw,
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(if (isCompact) 30.dp else 32.dp)
+                                .testTag("btn_propose_draw_$tagSuffix")
+                        ) {
+                            Text(
+                                text = "Proposer match nul",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (canProposeDraw) waliColors.accentGold else waliColors.textSecondary.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Bandeau central compact (non pivoté) affiché à côté du plateau en mode 2 joueurs local :
+ * indique la phase, la durée de la partie et les éventuels messages d'information/erreur.
+ */
+@Composable
+fun FaceToFaceCenterStatusStrip(
+    gameState: GameState,
+    gameDurationSeconds: Long,
+    feedbackMessage: String?,
+    isCompact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val waliColors = LocalWaliColors.current
+    val phaseLabel = when (gameState.phase) {
+        Phase.PLACEMENT -> if (isCompact) "Phase 1 : Pose" else "Phase 1 — Pose des pions"
+        Phase.MOVEMENT -> if (isCompact) "Phase 2 : Jeu" else "Phase 2 — Déplacement"
+        Phase.GAME_OVER -> "Partie terminée"
+    }
+    val modeLabel = if (isCompact) " • 2J" else " • 2 Joueurs"
+    val activePlayerName = if (gameState.currentPlayer == Player.STICKS) "BÂTONNETS" else "CAILLOUX"
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(waliColors.surfaceAlt.copy(alpha = 0.5f))
+                    .border(1.dp, waliColors.accentGold.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 10.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = phaseLabel + modeLabel,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = waliColors.textPrimary
+                    ),
+                    modifier = Modifier.testTag("phase_label")
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(waliColors.surfaceAlt.copy(alpha = 0.5f))
+                    .border(1.dp, waliColors.boardBorder.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Timer,
+                        contentDescription = "Durée de la partie",
+                        tint = waliColors.accentGold,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = com.example.wali.storage.formatTimerDigital(gameDurationSeconds),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = waliColors.textPrimary
+                        ),
+                        modifier = Modifier.testTag("game_duration_indicator")
+                    )
+                }
+            }
+
+            Text(
+                text = if (gameState.phase != Phase.GAME_OVER) "Tour : $activePlayerName" else "Partie achevée",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = waliColors.accentGold
+                ),
+                modifier = Modifier.testTag("turn_indicator")
+            )
+        }
+
+        AnimatedVisibility(
+            visible = feedbackMessage != null,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            feedbackMessage?.let { msg ->
+                val isError = msg.contains("interdit", ignoreCase = true) ||
+                        msg.contains("occupée", ignoreCase = true) ||
+                        msg.contains("aucun", ignoreCase = true)
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 3.dp)
+                        .testTag("feedback_banner"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isError) Color(0xFFFFECEB) else waliColors.surfaceAlt
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = SolidColor(
+                            if (isError) WaliErrorRed.copy(alpha = 0.4f) else waliColors.accentGold.copy(alpha = 0.4f)
+                        )
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isError) Icons.Default.Warning else Icons.Default.Info,
+                            contentDescription = null,
+                            tint = if (isError) WaliErrorRed else waliColors.textPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = if (isError) WaliErrorRed else waliColors.textPrimary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+

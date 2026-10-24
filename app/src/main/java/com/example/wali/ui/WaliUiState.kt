@@ -78,6 +78,7 @@ data class WaliUiState(
     val recentGames: List<GameResultRecord> = emptyList(),
     val showScoreboardDialog: Boolean = false,
     val showForfeitConfirmation: Boolean = false,
+    val pendingForfeitPlayer: Player? = null,
     val gameOverReason: String? = null,
     val rematchTimeoutRemainingSeconds: Int? = null,
     val rematchStatusMessage: String? = null,
@@ -235,6 +236,70 @@ data class WaliUiState(
                 onlineGameSession.drawOfferedBy == localPlayerUid
 
     /**
+     * Indique si une proposition de match nul est adressée spécifiquement à [player] (notamment en mode TWO_PLAYERS).
+     */
+    fun isDrawOfferedToPlayer(player: Player): Boolean {
+        if (isSpectator) return false
+        if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
+        return when (gameMode) {
+            GameMode.TWO_PLAYERS -> localDrawOfferedBy != null && localDrawOfferedBy != player
+            GameMode.ONLINE -> isDrawOfferedToMe && (localPlayerRole ?: humanPlayer) == player
+            GameMode.VS_COMPUTER -> false
+        }
+    }
+
+    /**
+     * Indique si [player] a proposé un match nul et attend la réponse de son adversaire.
+     */
+    fun isPlayerWaitingForDrawResponse(player: Player): Boolean {
+        if (isSpectator) return false
+        if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
+        return when (gameMode) {
+            GameMode.TWO_PLAYERS -> localDrawOfferedBy == player
+            GameMode.ONLINE -> isWaitingForDrawResponse && (localPlayerRole ?: humanPlayer) == player
+            GameMode.VS_COMPUTER -> false
+        }
+    }
+
+    /**
+     * Vrai si le joueur [player] peut proposer un match nul maintenant :
+     * - Uniquement en Phase.MOVEMENT (jamais en Phase.PLACEMENT)
+     * - Jamais en mode VS_COMPUTER ni en mode spectateur
+     * - C'est bien le tour de [player]
+     * - Aucune capture ni pose obligatoire en attente
+     * - Aucune proposition déjà en attente
+     * - Au moins un coup a été joué par [player] depuis sa dernière proposition refusée
+     */
+    fun canPlayerProposeDraw(player: Player): Boolean {
+        if (isSpectator) return false
+        if (gameMode == GameMode.VS_COMPUTER) return false
+        if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
+        if (gameState.pendingCaptures > 0) return false
+        if (gameState.hasPendingPlacements(player)) return false
+        if (isDrawOfferPending) return false
+        if (gameState.currentPlayer != player) return false
+
+        val currentTurnCount = gameState.moveHistory.size
+        return when (gameMode) {
+            GameMode.TWO_PLAYERS -> {
+                val inCooldown = localDrawOfferTurnCount >= 0 &&
+                        (localLastDrawProposer == null || localLastDrawProposer == player) &&
+                        currentTurnCount <= localDrawOfferTurnCount
+                !inCooldown
+            }
+            GameMode.ONLINE -> {
+                val session = onlineGameSession ?: return false
+                if (session.status != com.example.wali.online.OnlineGameStatus.ONGOING) return false
+                val myRole = localPlayerRole ?: session.getPlayerRole(localPlayerUid.orEmpty())
+                if (myRole == null || player != myRole) return false
+                val inCooldown = session.drawOfferTurnCount >= 0 && currentTurnCount <= session.drawOfferTurnCount
+                !inCooldown
+            }
+            GameMode.VS_COMPUTER -> false
+        }
+    }
+
+    /**
      * Vrai si le joueur dont c'est le tour peut proposer un match nul maintenant :
      * - Uniquement en Phase.MOVEMENT (jamais en Phase.PLACEMENT)
      * - Jamais en mode VS_COMPUTER ni en mode spectateur
@@ -243,32 +308,7 @@ data class WaliUiState(
      * - Au moins un tour complet s'est écoulé depuis la dernière proposition refusée
      */
     val canProposeDraw: Boolean
-        get() {
-            if (isSpectator) return false
-            if (gameMode == GameMode.VS_COMPUTER) return false
-            if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
-            if (gameState.pendingCaptures > 0) return false
-            if (isDrawOfferPending) return false
-
-            val currentTurnCount = gameState.moveHistory.size
-            return when (gameMode) {
-                GameMode.TWO_PLAYERS -> {
-                    val inCooldown = localDrawOfferTurnCount >= 0 &&
-                            (localLastDrawProposer == null || localLastDrawProposer == gameState.currentPlayer) &&
-                            currentTurnCount <= localDrawOfferTurnCount
-                    !inCooldown
-                }
-                GameMode.ONLINE -> {
-                    val session = onlineGameSession ?: return false
-                    if (session.status != com.example.wali.online.OnlineGameStatus.ONGOING) return false
-                    val myRole = localPlayerRole ?: session.getPlayerRole(localPlayerUid.orEmpty())
-                    if (myRole == null || gameState.currentPlayer != myRole) return false
-                    val inCooldown = session.drawOfferTurnCount >= 0 && currentTurnCount <= session.drawOfferTurnCount
-                    !inCooldown
-                }
-                GameMode.VS_COMPUTER -> false
-            }
-        }
+        get() = canPlayerProposeDraw(gameState.currentPlayer)
 
     /**
      * Vrai si la partie est terminée sur un match nul accepté par les deux joueurs.

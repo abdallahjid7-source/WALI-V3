@@ -605,13 +605,22 @@ fun ResetConfirmDialog(
 @Composable
 fun ForfeitConfirmDialog(
     onConfirm: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    forfeitingPlayer: Player? = null,
+    isRotated180: Boolean = false
 ) {
     val colors = LocalWaliColors.current
+    val playerLabel = when (forfeitingPlayer) {
+        Player.STICKS -> "Bâtonnets"
+        Player.STONES -> "Cailloux"
+        null -> null
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        modifier = Modifier.testTag("forfeit_confirm_dialog"),
+        modifier = Modifier
+            .graphicsLayer(rotationZ = if (isRotated180) 180f else 0f)
+            .testTag("forfeit_confirm_dialog"),
         shape = RoundedCornerShape(16.dp),
         containerColor = colors.surface,
         icon = {
@@ -624,7 +633,11 @@ fun ForfeitConfirmDialog(
         },
         title = {
             Text(
-                text = "Déclarer forfait",
+                text = if (playerLabel != null) {
+                    "$playerLabel, voulez-vous vraiment abandonner ?"
+                } else {
+                    "Déclarer forfait"
+                },
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontWeight = FontWeight.Bold,
                     color = colors.textPrimary

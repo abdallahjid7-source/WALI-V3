@@ -1131,6 +1131,7 @@ class WaliViewModel(
             showResetConfirmation = false,
             showModeSelectionDialog = false,
             showForfeitConfirmation = false,
+            pendingForfeitPlayer = null,
             gameOverReason = null,
             onlineGameSession = if (mode == GameMode.ONLINE) _uiState.value.onlineGameSession else null,
             onlineRole = if (mode == GameMode.ONLINE) _uiState.value.onlineRole else null,
@@ -1202,6 +1203,7 @@ class WaliViewModel(
                 showPauseMenu = false,
                 showResetConfirmation = false,
                 showForfeitConfirmation = false,
+                pendingForfeitPlayer = null,
                 gameOverReason = null,
                 localDrawOfferedBy = null,
                 localDrawOfferTurnCount = -1,
@@ -1213,11 +1215,23 @@ class WaliViewModel(
 
     /**
      * Demande l'ouverture de la boîte de dialogue de confirmation pour déclarer forfait.
+     * En mode TWO_PLAYERS, [player] identifie explicitement le joueur qui a cliqué sur son propre bouton Abandonner.
      */
-    fun requestForfeit() {
+    fun requestForfeit(player: Player? = null) {
         audio?.playClick()
         if (_uiState.value.canDeclareForfeit) {
-            _uiState.update { it.copy(showForfeitConfirmation = true, showPauseMenu = false) }
+            _uiState.update {
+                val targetPlayer = when (it.gameMode) {
+                    GameMode.TWO_PLAYERS -> player ?: it.gameState.currentPlayer
+                    GameMode.ONLINE -> it.localPlayerRole ?: it.humanPlayer
+                    GameMode.VS_COMPUTER -> it.humanPlayer
+                }
+                it.copy(
+                    showForfeitConfirmation = true,
+                    pendingForfeitPlayer = targetPlayer,
+                    showPauseMenu = false
+                )
+            }
         }
     }
 
@@ -1225,22 +1239,24 @@ class WaliViewModel(
      * Ferme la boîte de dialogue de confirmation d'abandon.
      */
     fun dismissForfeitConfirmation() {
-        _uiState.update { it.copy(showForfeitConfirmation = false) }
+        _uiState.update { it.copy(showForfeitConfirmation = false, pendingForfeitPlayer = null) }
     }
 
     /**
      * Valide l'abandon après confirmation par l'utilisateur.
      */
-    fun confirmForfeit() {
+    fun confirmForfeit(player: Player? = null) {
+        val target = player ?: _uiState.value.pendingForfeitPlayer
         dismissForfeitConfirmation()
-        declareForfeit()
+        declareForfeit(target)
     }
 
     /**
      * Déclare forfait pour la partie en cours.
      * Le joueur qui abandonne perd immédiatement et son adversaire est déclaré vainqueur.
+     * En mode TWO_PLAYERS, [player] identifie explicitement le joueur qui abandonne, quel que soit le tour actif.
      */
-    fun declareForfeit() {
+    fun declareForfeit(player: Player? = null) {
         audio?.playClick()
         val current = _uiState.value
         if (!current.canDeclareForfeit) return
@@ -1277,6 +1293,7 @@ class WaliViewModel(
                         gameState = gameOverState,
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
+                        pendingForfeitPlayer = null,
                         showPauseMenu = false,
                         localDrawOfferedBy = null,
                         feedbackMessage = "Vous avez déclaré forfait. Victoire de l'adversaire."
@@ -1310,6 +1327,7 @@ class WaliViewModel(
                         gameState = gameOverState,
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
+                        pendingForfeitPlayer = null,
                         showPauseMenu = false,
                         localDrawOfferedBy = null,
                         feedbackMessage = "Vous avez déclaré forfait."
@@ -1317,7 +1335,7 @@ class WaliViewModel(
                 }
             }
             GameMode.TWO_PLAYERS -> {
-                val forfeiter = current.gameState.currentPlayer
+                val forfeiter = player ?: current.pendingForfeitPlayer ?: current.gameState.currentPlayer
                 val winner = forfeiter.opponent
                 val gameOverState = current.gameState.copy(
                     winner = winner,
@@ -1334,6 +1352,7 @@ class WaliViewModel(
                         gameState = gameOverState,
                         gameOverReason = "Abandon",
                         showForfeitConfirmation = false,
+                        pendingForfeitPlayer = null,
                         showPauseMenu = false,
                         localDrawOfferedBy = null,
                         feedbackMessage = "Forfait déclaré par $forfeiter."
@@ -1344,24 +1363,24 @@ class WaliViewModel(
     }
 
     // =========================================================================
-    // PROPOSITION ET RÉPONSE DE MATCH NUL (PARTIE G1)
+    // PROPOSITION ET RÉPONSE DE MATCH NUL (PARTIE G1 & PARTIE H)
     // =========================================================================
 
     /**
-     * Propose un match nul pendant le tour du joueur courant en phase de déplacement.
-     * - Mode TWO_PLAYERS : ouvre immédiatement la boîte de dialogue bloquante pour l'adversaire.
+     * Propose un match nul pendant le tour du joueur en phase de déplacement.
+     * - Mode TWO_PLAYERS : [player] identifie explicitement le joueur qui propose depuis son panneau.
      * - Mode ONLINE : enregistre la proposition dans Firestore et publie le message système dans le chat.
      * - Mode VS_COMPUTER : indisponible (l'IA ne peut pas accepter de match nul).
      */
-    fun proposeDraw() {
+    fun proposeDraw(player: Player? = null) {
         val current = _uiState.value
-        if (!current.canProposeDraw) return
-        audio?.playClick()
 
         when (current.gameMode) {
             GameMode.VS_COMPUTER -> return
             GameMode.TWO_PLAYERS -> {
-                val proposer = current.gameState.currentPlayer
+                val proposer = player ?: current.gameState.currentPlayer
+                if (!current.canPlayerProposeDraw(proposer)) return
+                audio?.playClick()
                 val turnCount = current.gameState.moveHistory.size
                 _uiState.update {
                     it.copy(
@@ -1375,6 +1394,8 @@ class WaliViewModel(
                 }
             }
             GameMode.ONLINE -> {
+                if (!current.canProposeDraw) return
+                audio?.playClick()
                 val session = current.onlineGameSession ?: return
                 val repo = onlineRepository ?: return
                 val myUid = current.localPlayerUid ?: repo.currentUserId
@@ -1400,16 +1421,18 @@ class WaliViewModel(
 
     /**
      * Répond à une proposition de match nul en attente ([accept] = true pour accepter, false pour refuser).
+     * En mode TWO_PLAYERS, [responder] identifie le joueur qui répond (ne peut jamais être le proposant lui-même).
      */
-    fun respondToDraw(accept: Boolean) {
+    fun respondToDraw(accept: Boolean, responder: Player? = null) {
         val current = _uiState.value
         if (current.isSpectator) return
-        audio?.playClick()
 
         when (current.gameMode) {
             GameMode.VS_COMPUTER -> return
             GameMode.TWO_PLAYERS -> {
-                if (current.localDrawOfferedBy == null) return
+                val offeredBy = current.localDrawOfferedBy ?: return
+                if (responder != null && responder == offeredBy) return
+                audio?.playClick()
                 if (accept) {
                     stopTurnTimer()
                     aiTurnJob?.cancel()
@@ -1450,6 +1473,7 @@ class WaliViewModel(
                 val repo = onlineRepository ?: return
                 val myUid = current.localPlayerUid ?: repo.currentUserId
                 if (session.drawOfferedBy == null || session.drawOfferedBy == myUid) return
+                audio?.playClick()
                 val myRole = current.localPlayerRole ?: session.getPlayerRole(myUid)
                 val campName = if (myRole == Player.STICKS) "Bâtonnets" else "Cailloux"
                 val sysText = if (accept) {
@@ -1477,12 +1501,12 @@ class WaliViewModel(
     /**
      * Accepte la proposition de match nul en attente.
      */
-    fun acceptDraw() = respondToDraw(true)
+    fun acceptDraw(responder: Player? = null) = respondToDraw(true, responder)
 
     /**
      * Refuse la proposition de match nul en attente.
      */
-    fun refuseDraw() = respondToDraw(false)
+    fun refuseDraw(responder: Player? = null) = respondToDraw(false, responder)
 
     /**
      * Ouvre le menu de pause (overlay).
@@ -2503,6 +2527,7 @@ class WaliViewModel(
                             canDeclareAbandonment = false,
                             isOpponentDisconnected = false,
                             showForfeitConfirmation = false,
+                            pendingForfeitPlayer = null,
                             gameOverReason = null,
                             localDrawOfferedBy = null,
                             localDrawOfferTurnCount = -1,
@@ -2656,6 +2681,7 @@ class WaliViewModel(
                         },
                         canDeclareAbandonment = false,
                         showForfeitConfirmation = false,
+                        pendingForfeitPlayer = null,
                         isOpponentDisconnected = false
                     )
                 }

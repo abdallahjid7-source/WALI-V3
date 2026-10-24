@@ -437,4 +437,156 @@ class WaliViewModelTest {
         joinerVm.stopTurnTimer()
         joinerVm.stopOnlineInactivityMonitoring()
     }
+
+    // =========================================================================
+    // PARTIE H — MODE LOCAL 2 JOUEURS FACE-À-FACE (FORFAIT & NUL PAR JOUEUR)
+    // =========================================================================
+
+    @Test
+    fun localForfeit_sticksPlayerClicksOwnButton_stonesWins_evenDuringStonesTurn() {
+        // STICKS joue un premier pion -> le tour passe à STONES
+        viewModel.onCellClicked(Position(0, 0))
+        viewModel.stopTurnTimer()
+        assertEquals(Player.STONES, viewModel.uiState.value.gameState.currentPlayer)
+
+        // Le joueur STICKS (panneau du haut) clique sur SON propre bouton Abandonner pendant le tour de STONES
+        viewModel.requestForfeit(Player.STICKS)
+        assertTrue(viewModel.uiState.value.showForfeitConfirmation)
+        assertEquals(Player.STICKS, viewModel.uiState.value.pendingForfeitPlayer)
+
+        viewModel.confirmForfeit(Player.STICKS)
+
+        val state = viewModel.uiState.value
+        assertFalse(state.showForfeitConfirmation)
+        assertNull(state.pendingForfeitPlayer)
+        assertEquals(Phase.GAME_OVER, state.gameState.phase)
+        assertEquals("C'est STICKS qui a abandonné : STONES doit gagner même si c'était le tour de STONES", Player.STONES, state.gameState.winner)
+        assertEquals("Abandon", state.gameOverReason)
+        assertTrue("Aucune capture n'ayant eu lieu, la victoire vaut +2 points", state.gameState.isDoubleWin(Player.STONES))
+    }
+
+    @Test
+    fun localForfeit_stonesPlayerClicksOwnButton_sticksWins_evenDuringSticksTurn() {
+        // Dès le début de la partie, c'est le tour de STICKS
+        assertEquals(Player.STICKS, viewModel.uiState.value.gameState.currentPlayer)
+
+        // Le joueur STONES (panneau du bas) clique sur SON propre bouton Abandonner pendant le tour de STICKS
+        viewModel.requestForfeit(Player.STONES)
+        assertTrue(viewModel.uiState.value.showForfeitConfirmation)
+        assertEquals(Player.STONES, viewModel.uiState.value.pendingForfeitPlayer)
+
+        viewModel.confirmForfeit(Player.STONES)
+
+        val state = viewModel.uiState.value
+        assertFalse(state.showForfeitConfirmation)
+        assertNull(state.pendingForfeitPlayer)
+        assertEquals(Phase.GAME_OVER, state.gameState.phase)
+        assertEquals("C'est STONES qui a abandonné : STICKS doit gagner même si c'était le tour de STICKS", Player.STICKS, state.gameState.winner)
+        assertEquals("Abandon", state.gameOverReason)
+        assertTrue("Aucune capture n'ayant eu lieu, la victoire vaut +2 points", state.gameState.isDoubleWin(Player.STICKS))
+    }
+
+    @Test
+    fun localDraw_onlyActivePlayerCanPropose_inactivePlayerRejected() {
+        // Poser les 24 pions sans créer d'alignement pour atteindre Phase.MOVEMENT
+        val moves = listOf(
+            Position(0, 0), Position(0, 1),
+            Position(0, 2), Position(0, 3),
+            Position(0, 4), Position(0, 5),
+            Position(1, 1), Position(1, 0),
+            Position(1, 3), Position(1, 2),
+            Position(1, 5), Position(1, 4),
+            Position(2, 0), Position(2, 1),
+            Position(2, 2), Position(2, 3),
+            Position(2, 4), Position(2, 5),
+            Position(3, 1), Position(3, 0),
+            Position(3, 3), Position(3, 2),
+            Position(3, 5), Position(3, 4)
+        )
+        for (pos in moves) {
+            viewModel.onCellClicked(pos)
+            viewModel.stopTurnTimer()
+        }
+
+        assertEquals(Phase.MOVEMENT, viewModel.uiState.value.gameState.phase)
+        assertEquals(Player.STICKS, viewModel.uiState.value.gameState.currentPlayer)
+
+        // Seul STICKS (joueur actif) peut proposer un match nul
+        assertTrue(viewModel.uiState.value.canPlayerProposeDraw(Player.STICKS))
+        assertFalse(viewModel.uiState.value.canPlayerProposeDraw(Player.STONES))
+
+        // Une tentative de STONES (hors de son tour) est rejetée
+        viewModel.proposeDraw(Player.STONES)
+        assertNull(viewModel.uiState.value.localDrawOfferedBy)
+
+        // La proposition de STICKS (pendant son tour) est acceptée et adressée à STONES
+        viewModel.proposeDraw(Player.STICKS)
+        assertEquals(Player.STICKS, viewModel.uiState.value.localDrawOfferedBy)
+        assertTrue(viewModel.uiState.value.isDrawOfferedToPlayer(Player.STONES))
+        assertFalse(viewModel.uiState.value.isDrawOfferedToPlayer(Player.STICKS))
+        assertTrue(viewModel.uiState.value.isPlayerWaitingForDrawResponse(Player.STICKS))
+    }
+
+    @Test
+    fun localDraw_proposerCannotRespondToOwnOffer_andOpponentCanRefuseOrAccept() {
+        // Poser les 24 pions sans créer d'alignement pour atteindre Phase.MOVEMENT
+        val moves = listOf(
+            Position(0, 0), Position(0, 1),
+            Position(0, 2), Position(0, 3),
+            Position(0, 4), Position(0, 5),
+            Position(1, 1), Position(1, 0),
+            Position(1, 3), Position(1, 2),
+            Position(1, 5), Position(1, 4),
+            Position(2, 0), Position(2, 1),
+            Position(2, 2), Position(2, 3),
+            Position(2, 4), Position(2, 5),
+            Position(3, 1), Position(3, 0),
+            Position(3, 3), Position(3, 2),
+            Position(3, 5), Position(3, 4)
+        )
+        for (pos in moves) {
+            viewModel.onCellClicked(pos)
+            viewModel.stopTurnTimer()
+        }
+
+        assertEquals(Phase.MOVEMENT, viewModel.uiState.value.gameState.phase)
+        assertEquals(Player.STICKS, viewModel.uiState.value.gameState.currentPlayer)
+
+        // STICKS propose le match nul
+        viewModel.proposeDraw(Player.STICKS)
+        assertEquals(Player.STICKS, viewModel.uiState.value.localDrawOfferedBy)
+
+        // STICKS ne peut ni accepter ni refuser sa propre offre
+        viewModel.respondToDraw(true, Player.STICKS)
+        assertEquals(Player.STICKS, viewModel.uiState.value.localDrawOfferedBy)
+        assertEquals(Phase.MOVEMENT, viewModel.uiState.value.gameState.phase)
+
+        viewModel.respondToDraw(false, Player.STICKS)
+        assertEquals(Player.STICKS, viewModel.uiState.value.localDrawOfferedBy)
+        assertEquals(Phase.MOVEMENT, viewModel.uiState.value.gameState.phase)
+
+        // STONES refuse : l'offre est effacée, le tour reste à STICKS, et STICKS ne peut pas reproposer immédiatement
+        viewModel.respondToDraw(false, Player.STONES)
+        assertNull(viewModel.uiState.value.localDrawOfferedBy)
+        assertEquals(Player.STICKS, viewModel.uiState.value.gameState.currentPlayer)
+        assertFalse(viewModel.uiState.value.canPlayerProposeDraw(Player.STICKS))
+
+        // STICKS joue son coup (3,1 -> 4,1), le tour passe à STONES
+        viewModel.onCellClicked(Position(3, 1))
+        viewModel.onCellClicked(Position(4, 1))
+        viewModel.stopTurnTimer()
+        assertEquals(Player.STONES, viewModel.uiState.value.gameState.currentPlayer)
+
+        // STONES propose à son tour et STICKS accepte -> Match nul validé (winner == null)
+        assertTrue(viewModel.uiState.value.canPlayerProposeDraw(Player.STONES))
+        viewModel.proposeDraw(Player.STONES)
+        assertEquals(Player.STONES, viewModel.uiState.value.localDrawOfferedBy)
+        assertTrue(viewModel.uiState.value.isDrawOfferedToPlayer(Player.STICKS))
+
+        viewModel.respondToDraw(true, Player.STICKS)
+        assertEquals(Phase.GAME_OVER, viewModel.uiState.value.gameState.phase)
+        assertNull(viewModel.uiState.value.gameState.winner)
+        assertTrue(viewModel.uiState.value.isDrawGameOver)
+    }
 }
+

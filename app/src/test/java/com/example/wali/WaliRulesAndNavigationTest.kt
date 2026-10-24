@@ -221,5 +221,58 @@ class WaliRulesAndNavigationTest {
         composeTestRule.onNodeWithTag("btn_copy_spectator_code").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("btn_share_spectator_code").performScrollTo().assertIsDisplayed()
     }
+
+    @Test
+    fun `twoPlayersFaceToFace topPanelRotated180 hitTestingAndPlayerSpecificDialogsWork`() {
+        val vm = com.example.wali.ui.WaliViewModel()
+        vm.startNewGame(GameMode.TWO_PLAYERS, Player.STICKS, AiDifficulty.MEDIUM)
+        vm.stopTurnTimer()
+
+        composeTestRule.setContent {
+            com.example.wali.ui.WaliGameScreen(viewModel = vm)
+        }
+        composeTestRule.waitForIdle()
+
+        // 1. Les deux panneaux joueurs sont affichés, STICKS en haut et STONES en bas
+        val sticksBounds = composeTestRule.onNodeWithTag("player_panel_sticks").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val stonesBounds = composeTestRule.onNodeWithTag("player_panel_stones").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "Le panneau STICKS (haut) doit être positionné au-dessus du panneau STONES (bas)",
+            sticksBounds.top < stonesBounds.top
+        )
+
+        // 2. Test du hit-testing sur le bouton Abandonner pivoté à 180° du joueur du haut (STICKS)
+        composeTestRule.onNodeWithTag("btn_forfeit_sticks").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+
+        // La boîte de confirmation nomme explicitement Bâtonnets du côté du panneau du haut
+        composeTestRule.onNodeWithTag("forfeit_confirm_text_sticks", useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithText("Bâtonnets, voulez-vous vraiment abandonner ?", useUnmergedTree = true)
+            .assertIsDisplayed()
+        assertEquals(Player.STICKS, vm.uiState.value.pendingForfeitPlayer)
+
+        // Annulation via le bouton Annuler pivoté à 180° du joueur du haut
+        composeTestRule.onNodeWithTag("btn_cancel_forfeit_sticks").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(null, vm.uiState.value.pendingForfeitPlayer)
+
+        // 3. Pendant le tour de STICKS, le joueur du bas (STONES) clique sur SON propre bouton Abandonner
+        assertEquals(Player.STICKS, vm.uiState.value.gameState.currentPlayer)
+        composeTestRule.onNodeWithTag("btn_forfeit_stones").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("forfeit_confirm_text_stones", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Cailloux, voulez-vous vraiment abandonner ?", useUnmergedTree = true)
+            .assertIsDisplayed()
+        assertEquals(Player.STONES, vm.uiState.value.pendingForfeitPlayer)
+
+        composeTestRule.onNodeWithTag("btn_confirm_forfeit_stones").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+
+        // C'est STONES qui a abandonné : STICKS gagne
+        assertEquals(Player.STICKS, vm.uiState.value.gameState.winner)
+    }
 }
+
 
