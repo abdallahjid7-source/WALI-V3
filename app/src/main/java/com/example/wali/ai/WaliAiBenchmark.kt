@@ -182,6 +182,44 @@ object WaliAiBenchmark {
     }
 
     /**
+     * Cinquième position de référence (Correctif C) : position tactiquement instable en déplacement
+     * (alignements imminents croisés, contre-captures en chaîne et zones à faible mobilité).
+     * Permet de mesurer le coût réel des extensions anti-horizon (maxSearchExtensions = 0 vs 2).
+     */
+    val tacticalInstabilityState: GameState by lazy {
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // 6 BÂTONNETS : menaces d'alignement immédiates en (0,2) et (4,0) + pions sous pression
+                Position(0, 0) -> Player.STICKS
+                Position(0, 1) -> Player.STICKS
+                Position(1, 2) -> Player.STICKS
+                Position(2, 0) -> Player.STICKS
+                Position(3, 0) -> Player.STICKS
+                Position(4, 1) -> Player.STICKS
+                // 6 CAILLOUX : contre-menaces immédiates en (1,2), (4,2) et (4,5)
+                Position(1, 0) -> Player.STONES
+                Position(2, 2) -> Player.STONES
+                Position(3, 2) -> Player.STONES
+                Position(4, 3) -> Player.STONES
+                Position(4, 4) -> Player.STONES
+                Position(3, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 6,
+            stonesRemaining = 6,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+    }
+
+    /**
      * Exécute une mesure reproductible sur un état donné avec un budget fixé.
      */
     fun runBenchmarkForState(
@@ -254,5 +292,61 @@ object WaliAiBenchmark {
 
     fun runPlacementTransitionBenchmark(budgetMs: Long = 1000L): BenchmarkResult {
         return runBenchmarkForState(placementTransitionState, budgetMs, clearTt = true)
+    }
+
+    fun runTacticalBenchmark(
+        budgetMs: Long = 1000L,
+        maxExtensions: Int = 2
+    ): BenchmarkResult {
+        val prevExt = WaliAi.maxSearchExtensions
+        return try {
+            WaliAi.maxSearchExtensions = maxExtensions
+            runBenchmarkForState(tacticalInstabilityState, budgetMs, clearTt = true)
+        } finally {
+            WaliAi.maxSearchExtensions = prevExt
+        }
+    }
+
+    /**
+     * Exécute la suite complète des 5 positions du banc versionné sur l'appareil courant
+     * (avec mesure de la position tactique sans et avec extensions anti-horizon)
+     * et retourne un rapport formaté prêt à être affiché ou copié.
+     */
+    fun runFullDeviceSuite(
+        budgetMs: Long = 1000L,
+        onProgress: (String) -> Unit = {}
+    ): String {
+        val sb = StringBuilder()
+        val cores = Runtime.getRuntime().availableProcessors()
+        sb.appendLine("=== BANC DE MESURE WALI IA (budget=${budgetMs}ms, cores=$cores) ===")
+
+        onProgress("1/6 — Déplacement 6v6 (référence calme)...")
+        val refRes = runBenchmark(budgetMs = budgetMs, clearTt = true)
+        val refExt = WaliAi.profileExtensionsTriggered
+        sb.appendLine("VERSIONED_BENCHMARK_RESULT: ${refRes.summary()} | extTriggered=$refExt")
+
+        onProgress("2/6 — Pose début (2 pions posés)...")
+        val earlyRes = runPlacementEarlyBenchmark(budgetMs = budgetMs)
+        sb.appendLine("BENCHMARK_PLACEMENT_EARLY: ${earlyRes.summary()}")
+
+        onProgress("3/6 — Pose milieu (12 pions posés)...")
+        val midRes = runPlacementMidBenchmark(budgetMs = budgetMs)
+        sb.appendLine("BENCHMARK_PLACEMENT_MID: ${midRes.summary()}")
+
+        onProgress("4/6 — Pose transition (23 pions posés)...")
+        val transRes = runPlacementTransitionBenchmark(budgetMs = budgetMs)
+        sb.appendLine("BENCHMARK_PLACEMENT_TRANSITION: ${transRes.summary()}")
+
+        onProgress("5/6 — Déplacement tactique (maxExtensions=0)...")
+        val tac0Res = runTacticalBenchmark(budgetMs = budgetMs, maxExtensions = 0)
+        val tac0Ext = WaliAi.profileExtensionsTriggered
+        sb.appendLine("BENCHMARK_TACTICAL_EXT0: ${tac0Res.summary()} | extTriggered=$tac0Ext")
+
+        onProgress("6/6 — Déplacement tactique (maxExtensions=2)...")
+        val tac2Res = runTacticalBenchmark(budgetMs = budgetMs, maxExtensions = 2)
+        val tac2Ext = WaliAi.profileExtensionsTriggered
+        sb.appendLine("BENCHMARK_TACTICAL_EXT2: ${tac2Res.summary()} | extTriggered=$tac2Ext")
+
+        return sb.toString().trimEnd()
     }
 }

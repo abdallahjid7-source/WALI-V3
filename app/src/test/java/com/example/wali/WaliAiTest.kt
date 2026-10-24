@@ -1327,4 +1327,214 @@ class WaliAiTest {
 
         return score
     }
+
+    @Test
+    fun zobrist_distinguishesPositionsDifferingOnlyByUsedLines() {
+        // Correctif A : Deux GameState au plateau, trait, phase et compteurs strictement identiques,
+        // mais dont l'un contient une ligne dans usedLines et l'autre non.
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0), Position(0, 1), Position(1, 2), Position(3, 0) -> Player.STICKS
+                Position(2, 2), Position(3, 3), Position(4, 4), Position(1, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        val lineRow0 = Line(setOf(Position(0, 0), Position(0, 1), Position(0, 2)))
+        val lineCol0 = Line(setOf(Position(0, 0), Position(1, 0), Position(2, 0)))
+
+        val stateWithoutUsedLine = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 4,
+            stonesRemaining = 4,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+        val stateWithUsedLine = stateWithoutUsedLine.copy(
+            usedLines = setOf(lineRow0)
+        )
+
+        // 1. Les empreintes Zobrist doivent différer
+        val hashWithout = WaliAi.computeZobristHash(stateWithoutUsedLine)
+        val hashWith = WaliAi.computeZobristHash(stateWithUsedLine)
+        assertTrue(
+            "computeZobristHash doit distinguer deux positions ne différant que par usedLines ($hashWithout vs $hashWith)",
+            hashWithout != hashWith
+        )
+
+        // Vérifie aussi l'indépendance à l'ordre d'insertion dans usedLines (propriété du XOR)
+        val stateMulti1 = stateWithoutUsedLine.copy(usedLines = linkedSetOf(lineRow0, lineCol0))
+        val stateMulti2 = stateWithoutUsedLine.copy(usedLines = linkedSetOf(lineCol0, lineRow0))
+        assertEquals(
+            "L'ordre des lignes dans usedLines ne doit pas modifier le hachage Zobrist",
+            WaliAi.computeZobristHash(stateMulti1),
+            WaliAi.computeZobristHash(stateMulti2)
+        )
+        assertTrue(WaliAi.computeZobristHash(stateMulti1) != hashWith)
+
+        // 2. Preuve que WaliEngine leur attribue des captures légales différentes sur le même coup (1,2)->(0,2)
+        val afterWithout = WaliEngine.movePiece(stateWithoutUsedLine, Position(1, 2), Position(0, 2), recordHistory = false)
+        val afterWith = WaliEngine.movePiece(stateWithUsedLine, Position(1, 2), Position(0, 2), recordHistory = false)
+        assertEquals("Sans ligne dans usedLines, (1,2)->(0,2) donne 1 capture", 1, afterWithout.pendingCaptures)
+        assertTrue(WaliEngine.canCapture(afterWithout))
+        assertEquals("Avec la ligne déjà dans usedLines, (1,2)->(0,2) donne 0 capture", 0, afterWith.pendingCaptures)
+        assertTrue(!WaliEngine.canCapture(afterWith))
+    }
+
+    @Test
+    fun ai_hard_isSideAgnostic_mirroredPositionYieldsMirroredDecision() {
+        // Correctif B : Vérifie que l'évaluation et la décision de recherche profonde sont
+        // strictement symétriques et indépendantes du camp joué (STICKS vs STONES).
+
+        // --- 1. Milieu de partie en Phase.MOVEMENT ---
+        val movBoardSticks = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0), Position(0, 1), Position(1, 2), Position(2, 4), Position(3, 1) -> Player.STICKS
+                Position(1, 0), Position(2, 2), Position(3, 3), Position(4, 1), Position(4, 4), Position(0, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        val movStateSticks = GameState(
+            board = movBoardSticks,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 5,
+            stonesRemaining = 6,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0,
+            sticksPendingPlacement = 0,
+            stonesPendingPlacement = 0,
+            capturedBySticks = 6,
+            capturedByStones = 7
+        )
+
+        val movBoardStones = movBoardSticks.mapValues { (_, piece) -> piece?.opponent }
+        val movStateStones = GameState(
+            board = movBoardStones,
+            currentPlayer = Player.STONES,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 6,
+            stonesRemaining = 5,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0,
+            sticksPendingPlacement = 0,
+            stonesPendingPlacement = 0,
+            capturedBySticks = 7,
+            capturedByStones = 6
+        )
+
+        val evalMovSticks = WaliAi.evaluateStateDeep(movStateSticks, Player.STICKS)
+        val evalMovStones = WaliAi.evaluateStateDeep(movStateStones, Player.STONES)
+        assertEquals(
+            "evaluateStateDeep en MOVEMENT doit être strictement invariant par échange des camps",
+            evalMovSticks,
+            evalMovStones
+        )
+
+        WaliAi.clearTranspositionTable()
+        val moveSticks = WaliAi.chooseMove(movStateSticks, AiDifficulty.HARD, Random(42), timeBudgetMs = 400L)
+        WaliAi.clearTranspositionTable()
+        val moveStones = WaliAi.chooseMove(movStateStones, AiDifficulty.HARD, Random(42), timeBudgetMs = 400L)
+
+        assertNotNull(moveSticks)
+        assertNotNull(moveStones)
+        assertEquals("Origine géométrique identique en MOVEMENT", moveSticks!!.moveFrom, moveStones!!.moveFrom)
+        assertEquals("Destination géométrique identique en MOVEMENT", moveSticks.moveTo, moveStones.moveTo)
+        assertEquals("Cible de capture géométrique identique en MOVEMENT", moveSticks.captureTarget, moveStones.captureTarget)
+
+        // --- 2. Position en Phase.PLACEMENT (couvre l'évaluation de pose Phase 5/6) ---
+        val placeBoardSticks = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(1, 1), Position(1, 2), Position(3, 1), Position(2, 4), Position(4, 2) -> Player.STICKS
+                Position(0, 2), Position(2, 1), Position(2, 2), Position(3, 3), Position(4, 4) -> Player.STONES
+                else -> null
+            }
+        }
+        val placeStateSticks = GameState(
+            board = placeBoardSticks,
+            currentPlayer = Player.STICKS,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 7,
+            stonesRemaining = 7,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0,
+            sticksPendingPlacement = 0,
+            stonesPendingPlacement = 0,
+            capturedBySticks = 0,
+            capturedByStones = 0
+        )
+
+        val placeBoardStones = placeBoardSticks.mapValues { (_, piece) -> piece?.opponent }
+        val placeStateStones = GameState(
+            board = placeBoardStones,
+            currentPlayer = Player.STONES,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 7,
+            stonesRemaining = 7,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0,
+            sticksPendingPlacement = 0,
+            stonesPendingPlacement = 0,
+            capturedBySticks = 0,
+            capturedByStones = 0
+        )
+
+        val evalPlaceSticks = WaliAi.evaluateStateDeep(placeStateSticks, Player.STICKS)
+        val evalPlaceStones = WaliAi.evaluateStateDeep(placeStateStones, Player.STONES)
+        assertEquals(
+            "evaluateStateDeep en PLACEMENT doit être strictement invariant par échange des camps",
+            evalPlaceSticks,
+            evalPlaceStones
+        )
+
+        WaliAi.clearTranspositionTable()
+        val placementMoveSticks = WaliAi.chooseMove(placeStateSticks, AiDifficulty.HARD, Random(42), timeBudgetMs = 400L)
+        WaliAi.clearTranspositionTable()
+        val placementMoveStones = WaliAi.chooseMove(placeStateStones, AiDifficulty.HARD, Random(42), timeBudgetMs = 400L)
+
+        assertNotNull(placementMoveSticks)
+        assertNotNull(placementMoveStones)
+        assertEquals(
+            "Case de pose géométrique identique en PLACEMENT",
+            placementMoveSticks!!.placement,
+            placementMoveStones!!.placement
+        )
+    }
+
+    @Test
+    fun benchmark_tacticalPosition_reportsMetricsWithAndWithoutExtensions() {
+        // Correctif C : Mesure sur la 5e position tactiquement instable avec et sans extensions anti-horizon
+        val resNoExt = com.example.wali.ai.WaliAiBenchmark.runTacticalBenchmark(budgetMs = 1000L, maxExtensions = 0)
+        val extCount0 = WaliAi.profileExtensionsTriggered
+        System.err.println("BENCHMARK_TACTICAL_EXT0: ${resNoExt.summary()} | extTriggered=$extCount0")
+
+        val resWithExt = com.example.wali.ai.WaliAiBenchmark.runTacticalBenchmark(budgetMs = 1000L, maxExtensions = 2)
+        val extCount2 = WaliAi.profileExtensionsTriggered
+        System.err.println("BENCHMARK_TACTICAL_EXT2: ${resWithExt.summary()} | extTriggered=$extCount2")
+
+        assertEquals(0L, extCount0)
+        assertTrue("Les extensions anti-horizon doivent se déclencher sur la position tactique (extCount2=$extCount2)", extCount2 > 0L)
+        assertTrue(resNoExt.completedDepth >= 5)
+        assertTrue(resWithExt.completedDepth >= 5)
+        assertEquals(
+            resNoExt.wallTimeMs,
+            resNoExt.timeOrderMovesMs + resNoExt.timeEngineMoveMs + resNoExt.timeCaptureMs + resNoExt.timeEvalMs + resNoExt.timeTtMs + resNoExt.timeLegalMovesMs + resNoExt.timeOtherMs
+        )
+        assertEquals(
+            resWithExt.wallTimeMs,
+            resWithExt.timeOrderMovesMs + resWithExt.timeEngineMoveMs + resWithExt.timeCaptureMs + resWithExt.timeEvalMs + resWithExt.timeTtMs + resWithExt.timeLegalMovesMs + resWithExt.timeOtherMs
+        )
+    }
 }
+

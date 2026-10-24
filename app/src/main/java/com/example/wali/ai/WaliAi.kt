@@ -475,6 +475,7 @@ object WaliAi {
         val stonesRemaining: LongArray = LongArray(13)
         val sticksPending: LongArray = LongArray(13)
         val stonesPending: LongArray = LongArray(13)
+        val usedLineKeys: Map<Line, Long>
 
         init {
             val rng = Random(0x504E474841494CL) // "PNGHAI" seed déterministe
@@ -489,13 +490,19 @@ object WaliAi {
             for (i in stonesRemaining.indices) stonesRemaining[i] = rng.nextLong()
             for (i in sticksPending.indices) sticksPending[i] = rng.nextLong()
             for (i in stonesPending.indices) stonesPending[i] = rng.nextLong()
+            usedLineKeys = buildMap(all38LinePatterns.size) {
+                for (pattern in all38LinePatterns) {
+                    put(Line(pattern.cells.toSet()), rng.nextLong())
+                }
+            }
         }
     }
 
     /**
      * Calcule l'empreinte Zobrist complète 64-bit d'une position de jeu.
      * Prend en compte l'occupation des 30 cases, le trait, la phase, les réserves,
-     * les poses différées et l'état de capture en attente pour garantir zéro fausse collision.
+     * les poses différées, l'état de capture en attente et les lignes déjà utilisées ([GameState.usedLines])
+     * pour garantir zéro fausse collision.
      */
     fun computeZobristHash(state: GameState): Long {
         var h = 0L
@@ -515,6 +522,12 @@ object WaliAi {
         h = h xor Zobrist.stonesRemaining[state.stonesRemaining.coerceIn(0, 12)]
         h = h xor Zobrist.sticksPending[state.sticksPendingPlacement.coerceIn(0, 12)]
         h = h xor Zobrist.stonesPending[state.stonesPendingPlacement.coerceIn(0, 12)]
+        if (state.usedLines.isNotEmpty()) {
+            for (line in state.usedLines) {
+                val lineKey = Zobrist.usedLineKeys[line] ?: line.hashCode().toLong()
+                h = h xor lineKey
+            }
+        }
         return h
     }
 
@@ -567,6 +580,7 @@ object WaliAi {
     var profileTimeLegalMovesNanos: Long = 0L
     var profileTimeCaptureNanos: Long = 0L
     var profileTotalNodes: Long = 0L
+    var profileExtensionsTriggered: Long = 0L
 
     fun resetProfiling() {
         profileTimeOrderMovesNanos = 0L
@@ -576,6 +590,7 @@ object WaliAi {
         profileTimeLegalMovesNanos = 0L
         profileTimeCaptureNanos = 0L
         profileTotalNodes = 0L
+        profileExtensionsTriggered = 0L
     }
 
     fun clearTranspositionTable() {
@@ -1145,6 +1160,7 @@ object WaliAi {
 
         // Si une capture est directement en attente sur l'état courant, la résoudre obligatoirement
         if (state.pendingCaptures > 0) {
+            if (depth <= 0 && isProfilingEnabled) profileExtensionsTriggered++
             val nextDepth = if (depth <= 0) 1 else depth
             val nextExt = if (depth <= 0) maxOf(0, extensionsLeft - 1) else extensionsLeft
             return evaluateMoveOutcome(
@@ -1169,6 +1185,7 @@ object WaliAi {
         if (effectiveDepth <= 0) {
             if (currentExtensionsLeft > 0 && lastMoveWasCapture) {
                 // Extension immédiate à coût nul : un alignement vient d'être formé sur le dernier demi-coup
+                if (isProfilingEnabled) profileExtensionsTriggered++
                 effectiveDepth = 1
                 currentExtensionsLeft -= 1
             } else {
@@ -1181,6 +1198,7 @@ object WaliAi {
                 if (isProfilingEnabled) profileTimeEvalNanos += System.nanoTime() - t4
 
                 if (evalOrExtend == EXTEND_LOW_MOBILITY_SENTINEL) {
+                    if (isProfilingEnabled) profileExtensionsTriggered++
                     effectiveDepth = 1
                     currentExtensionsLeft -= 1
                 } else {

@@ -36,12 +36,20 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.os.Build
+import android.util.Log
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -51,21 +59,28 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.wali.ads.WaliAdManager
+import com.example.wali.ai.WaliAiBenchmark
 import com.example.wali.ui.theme.LocalWaliColors
 import com.example.wali.ui.theme.WaliThemePalette
 import com.example.wali.ui.theme.getColorsForPalette
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -101,6 +116,12 @@ fun WaliSettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val colors = LocalWaliColors.current
+    val context = LocalContext.current
+    val isDebugBuild = remember(context) {
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+    val secretTapCount = remember { mutableIntStateOf(0) }
+    val showDiagnosticCard = isDebugBuild || secretTapCount.intValue >= 5
 
     Scaffold(
         modifier = modifier
@@ -109,7 +130,11 @@ fun WaliSettingsScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
+                    Column(
+                        modifier = Modifier
+                            .testTag("settings_header_title")
+                            .clickable { secretTapCount.intValue++ }
+                    ) {
                         Text(
                             text = "Réglages",
                             style = MaterialTheme.typography.titleLarge.copy(
@@ -223,6 +248,13 @@ fun WaliSettingsScreen(
                 item {
                     // Section 4 : Annonce récompensée / Soutien
                     RewardSupportCard()
+                }
+
+                if (showDiagnosticCard) {
+                    item {
+                        // Section 5 (Mode Debug ou déverrouillé par 5 pressions sur "Réglages") : Banc de mesure IA
+                        AiDiagnosticBenchmarkCard()
+                    }
                 }
 
                 item {
@@ -1023,4 +1055,149 @@ private fun RuleVariantsSettingsCard(
         }
     }
 }
+
+@Composable
+private fun AiDiagnosticBenchmarkCard() {
+    val colors = LocalWaliColors.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val isRunning = remember { mutableStateOf(false) }
+    val progressLabel = remember { mutableStateOf<String?>(null) }
+    val reportText = remember { mutableStateOf<String?>(null) }
+    val copiedFeedback = remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("card_ai_diagnostic_benchmark"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = colors.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Speed,
+                    contentDescription = "Diagnostic IA",
+                    tint = colors.accentGold,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Diagnostic IA — Banc de mesure (Appareil réel)",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "Exécute les 5 positions de référence (budget 1 000 ms chacune, ≈ 6 secondes au total) sur le processeur de cet appareil et affiche les métriques complètes (nœuds, nps, profondeur, répartition).",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = colors.textSecondary
+                )
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        if (!isRunning.value) {
+                            isRunning.value = true
+                            copiedFeedback.value = false
+                            reportText.value = null
+                            scope.launch {
+                                val deviceHeader = "Appareil: ${Build.MANUFACTURER} ${Build.MODEL} (SDK ${Build.VERSION.SDK_INT}, SoC=${Build.HARDWARE})"
+                                val suiteOutput = withContext(Dispatchers.Default) {
+                                    WaliAiBenchmark.runFullDeviceSuite(
+                                        budgetMs = 1000L,
+                                        onProgress = { step ->
+                                            progressLabel.value = step
+                                        }
+                                    )
+                                }
+                                val fullReport = "$deviceHeader\n$suiteOutput"
+                                Log.i("WaliAiBenchmark", "\n$fullReport")
+                                reportText.value = fullReport
+                                progressLabel.value = null
+                                isRunning.value = false
+                            }
+                        }
+                    },
+                    enabled = !isRunning.value,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("btn_run_ai_benchmark"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.accentEarth,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text(
+                        text = if (isRunning.value) (progressLabel.value ?: "Mesure en cours...") else "Lancer les 5 bancs (6 s)",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+
+                if (reportText.value != null) {
+                    OutlinedButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("WaliAiBenchmark", reportText.value))
+                            copiedFeedback.value = true
+                        },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("btn_copy_ai_benchmark"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (copiedFeedback.value) "Copié !" else "Copier",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textPrimary
+                            )
+                        )
+                    }
+                }
+            }
+
+            reportText.value?.let { report ->
+                Spacer(modifier = Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.surfaceAlt.copy(alpha = 0.7f))
+                        .padding(10.dp)
+                        .testTag("text_ai_benchmark_report")
+                ) {
+                    Text(
+                        text = report,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            color = colors.textPrimary
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
 
