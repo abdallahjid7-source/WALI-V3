@@ -538,26 +538,79 @@ object WaliAi {
     private const val TT_SIZE_BITS = 18
     private const val TT_SIZE = 1 shl TT_SIZE_BITS
     private const val TT_MASK = TT_SIZE - 1
+    private const val MAX_SEARCH_DEPTH = 32
 
-    private val ttKeys = LongArray(TT_SIZE)
-    private val ttDepths = IntArray(TT_SIZE)
-    private val ttScores = IntArray(TT_SIZE)
-    private val ttBounds = ByteArray(TT_SIZE)
-    private val ttFromRow = ByteArray(TT_SIZE) { -1 }
-    private val ttFromCol = ByteArray(TT_SIZE) { -1 }
-    private val ttToRow = ByteArray(TT_SIZE) { -1 }
-    private val ttToCol = ByteArray(TT_SIZE) { -1 }
+    private class ThreadSearchContext {
+        val ttKeys = LongArray(TT_SIZE)
+        val ttDepths = IntArray(TT_SIZE)
+        val ttScores = IntArray(TT_SIZE)
+        val ttBounds = ByteArray(TT_SIZE)
+        val ttFromRow = ByteArray(TT_SIZE) { -1 }
+        val ttFromCol = ByteArray(TT_SIZE) { -1 }
+        val ttToRow = ByteArray(TT_SIZE) { -1 }
+        val ttToCol = ByteArray(TT_SIZE) { -1 }
+
+        val killerMoves = Array(MAX_SEARCH_DEPTH) { arrayOfNulls<Pair<Position, Position>>(2) }
+        val historyTable = Array(2) { IntArray(Position.TOTAL_CELLS * Position.TOTAL_CELLS) }
+        val placementHistoryTable = Array(2) { IntArray(Position.TOTAL_CELLS) }
+
+        var lastSearchCompletedDepth: Int = 0
+        var lastSearchNodeCount: Int = 0
+        var lastPlannedCaptureTarget: Position? = null
+        var lastTtPerspectivePlayer: Player? = null
+
+        var useOpeningBook: Boolean = false
+        var randomizeRootTieBreaks: Boolean = false
+        var rootScoreNoiseMargin: Int = 0
+        var gameMovementHistoryHashes: Set<Long> = emptySet()
+        var currentRepetitionScore: Int = 0
+        var currentOpponentRepetitionScore: Int = 0
+
+        fun clearTt() {
+            ttKeys.fill(0L)
+            ttDepths.fill(0)
+            ttScores.fill(0)
+            ttBounds.fill(0)
+            ttFromRow.fill(-1)
+            ttFromCol.fill(-1)
+            ttToRow.fill(-1)
+            ttToCol.fill(-1)
+            lastPlannedCaptureTarget = null
+            lastTtPerspectivePlayer = null
+        }
+
+        fun resetOrdering() {
+            for (d in 0 until MAX_SEARCH_DEPTH) {
+                killerMoves[d][0] = null
+                killerMoves[d][1] = null
+            }
+            historyTable[0].fill(0)
+            historyTable[1].fill(0)
+            placementHistoryTable[0].fill(0)
+            placementHistoryTable[1].fill(0)
+        }
+    }
+
+    private val threadContext = ThreadLocal.withInitial { ThreadSearchContext() }
 
     var isTranspositionTableEnabled: Boolean = true
-    var lastSearchCompletedDepth: Int = 0
-    var lastSearchNodeCount: Int = 0
+
+    var lastSearchCompletedDepth: Int
+        get() = threadContext.get().lastSearchCompletedDepth
+        set(value) { threadContext.get().lastSearchCompletedDepth = value }
+
+    var lastSearchNodeCount: Int
+        get() = threadContext.get().lastSearchNodeCount
+        set(value) { threadContext.get().lastSearchNodeCount = value }
 
     /**
      * Cible de capture planifiée par la recherche principale (variante principale du coup retenu).
      * Consommée directement par [chooseCaptureTarget] en niveau Difficile pour garantir qu'aucune divergence
      * n'existe entre le coup joué et la capture effectuée.
      */
-    var lastPlannedCaptureTarget: Position? = null
+    var lastPlannedCaptureTarget: Position?
+        get() = threadContext.get().lastPlannedCaptureTarget
+        set(value) { threadContext.get().lastPlannedCaptureTarget = value }
 
     /**
      * Plafond de branchement sur les cibles de capture pour les plis profonds (> 2).
@@ -571,6 +624,42 @@ object WaliAi {
      * (alignement formé, capture en attente, asphyxie imminente).
      */
     var maxSearchExtensions: Int = 2
+
+    /**
+     * Active ou désactive la consultation du livre d'ouverture (Phase 7) pour les duels d'auto-affrontement.
+     */
+    var useOpeningBook: Boolean
+        get() = threadContext.get().useOpeningBook
+        set(value) { threadContext.get().useOpeningBook = value }
+
+    /**
+     * Active le départage aléatoire (via le [Random] fourni à [chooseMove]) entre les coups racines
+     * ayant un score statique et minimax strictement ex-æquo, afin d'éviter le biais d'indice (0,0)
+     * lors des campagnes d'auto-affrontement sur 200 parties.
+     */
+    var randomizeRootTieBreaks: Boolean
+        get() = threadContext.get().randomizeRootTieBreaks
+        set(value) { threadContext.get().randomizeRootTieBreaks = value }
+
+    /**
+     * Marge optionnelle de bruit d'évaluation à la racine (en points centi-pions, 0 en jeu normal et sur les bancs).
+     * Permet en auto-affrontement d'explorer les coups quasi ex-æquo (ex: ±18 pts sur 1200 pts/pion).
+     */
+    var rootScoreNoiseMargin: Int
+        get() = threadContext.get().rootScoreNoiseMargin
+        set(value) { threadContext.get().rootScoreNoiseMargin = value }
+
+    /**
+     * Ensemble des empreintes Zobrist déjà rencontrées en phase MOVEMENT depuis la dernière capture.
+     * Permet à l'IA d'évaluer une répétition de position comme une nulle (0) au lieu de boucler en position gagnante.
+     */
+    var gameMovementHistoryHashes: Set<Long>
+        get() = threadContext.get().gameMovementHistoryHashes
+        set(value) { threadContext.get().gameMovementHistoryHashes = value }
+
+    private var lastTtPerspectivePlayer: Player?
+        get() = threadContext.get().lastTtPerspectivePlayer
+        set(value) { threadContext.get().lastTtPerspectivePlayer = value }
 
     var isProfilingEnabled: Boolean = false
     var profileTimeOrderMovesNanos: Long = 0L
@@ -594,32 +683,25 @@ object WaliAi {
     }
 
     fun clearTranspositionTable() {
-        ttKeys.fill(0L)
-        ttDepths.fill(0)
-        ttScores.fill(0)
-        ttBounds.fill(0)
-        ttFromRow.fill(-1)
-        ttFromCol.fill(-1)
-        ttToRow.fill(-1)
-        ttToCol.fill(-1)
-        lastPlannedCaptureTarget = null
+        threadContext.get().clearTt()
     }
 
     private fun ttLookup(key: Long): TtLookupResult? {
         if (!isTranspositionTableEnabled) return null
+        val ctx = threadContext.get()
         val idx = key.toInt() and TT_MASK
-        val boundByte = ttBounds[idx].toInt()
-        if (boundByte == 0 || ttKeys[idx] != key) return null
+        val boundByte = ctx.ttBounds[idx].toInt()
+        if (boundByte == 0 || ctx.ttKeys[idx] != key) return null
 
-        val bestMove = if (ttFromRow[idx] >= 0) {
+        val bestMove = if (ctx.ttFromRow[idx] >= 0) {
             Pair(
-                Position(ttFromRow[idx].toInt(), ttFromCol[idx].toInt()),
-                Position(ttToRow[idx].toInt(), ttToCol[idx].toInt())
+                Position(ctx.ttFromRow[idx].toInt(), ctx.ttFromCol[idx].toInt()),
+                Position(ctx.ttToRow[idx].toInt(), ctx.ttToCol[idx].toInt())
             )
         } else null
 
-        val bestPlacement = if (ttFromRow[idx] == (-1).toByte() && ttToRow[idx] >= 0) {
-            Position(ttToRow[idx].toInt(), ttToCol[idx].toInt())
+        val bestPlacement = if (ctx.ttFromRow[idx] == (-1).toByte() && ctx.ttToRow[idx] >= 0) {
+            Position(ctx.ttToRow[idx].toInt(), ctx.ttToCol[idx].toInt())
         } else null
 
         val bound = when (boundByte) {
@@ -628,7 +710,7 @@ object WaliAi {
             3 -> TtBound.UPPER
             else -> return null
         }
-        return TtLookupResult(ttDepths[idx], ttScores[idx], bound, bestMove, bestPlacement)
+        return TtLookupResult(ctx.ttDepths[idx], ctx.ttScores[idx], bound, bestMove, bestPlacement)
     }
 
     private fun ttStore(
@@ -640,32 +722,33 @@ object WaliAi {
         bestPlacement: Position? = null
     ) {
         if (!isTranspositionTableEnabled) return
+        val ctx = threadContext.get()
         val idx = key.toInt() and TT_MASK
-        if (ttBounds[idx].toInt() == 0 || ttKeys[idx] == key || depth >= ttDepths[idx]) {
-            ttKeys[idx] = key
-            ttDepths[idx] = depth
-            ttScores[idx] = score
-            ttBounds[idx] = when (bound) {
+        if (ctx.ttBounds[idx].toInt() == 0 || ctx.ttKeys[idx] == key || depth >= ctx.ttDepths[idx]) {
+            ctx.ttKeys[idx] = key
+            ctx.ttDepths[idx] = depth
+            ctx.ttScores[idx] = score
+            ctx.ttBounds[idx] = when (bound) {
                 TtBound.EXACT -> 1
                 TtBound.LOWER -> 2
                 TtBound.UPPER -> 3
             }.toByte()
 
             if (bestMove != null) {
-                ttFromRow[idx] = bestMove.first.row.toByte()
-                ttFromCol[idx] = bestMove.first.col.toByte()
-                ttToRow[idx] = bestMove.second.row.toByte()
-                ttToCol[idx] = bestMove.second.col.toByte()
+                ctx.ttFromRow[idx] = bestMove.first.row.toByte()
+                ctx.ttFromCol[idx] = bestMove.first.col.toByte()
+                ctx.ttToRow[idx] = bestMove.second.row.toByte()
+                ctx.ttToCol[idx] = bestMove.second.col.toByte()
             } else if (bestPlacement != null) {
-                ttFromRow[idx] = -1
-                ttFromCol[idx] = -1
-                ttToRow[idx] = bestPlacement.row.toByte()
-                ttToCol[idx] = bestPlacement.col.toByte()
+                ctx.ttFromRow[idx] = -1
+                ctx.ttFromCol[idx] = -1
+                ctx.ttToRow[idx] = bestPlacement.row.toByte()
+                ctx.ttToCol[idx] = bestPlacement.col.toByte()
             } else {
-                ttFromRow[idx] = -1
-                ttFromCol[idx] = -1
-                ttToRow[idx] = -1
-                ttToCol[idx] = -1
+                ctx.ttFromRow[idx] = -1
+                ctx.ttFromCol[idx] = -1
+                ctx.ttToRow[idx] = -1
+                ctx.ttToCol[idx] = -1
             }
         }
     }
@@ -700,6 +783,10 @@ object WaliAi {
         }
 
         val aiPlayer = state.currentPlayer
+        if (lastTtPerspectivePlayer != aiPlayer) {
+            clearTranspositionTable()
+            lastTtPerspectivePlayer = aiPlayer
+        }
         val startTime = System.currentTimeMillis()
         val deadline = startTime + timeBudgetMs
         val nodeCounter = IntArray(1)
@@ -710,9 +797,15 @@ object WaliAi {
         var lastCompletedDepth = 0
 
         val tOrd0 = if (isProfilingEnabled) System.nanoTime() else 0L
-        var placementList = orderPlacementsCheap(state, validPlacements, aiPlayer, 1)
+        val rootCandidates = if (randomizeRootTieBreaks) validPlacements.shuffled(random) else validPlacements
+        var placementList = orderPlacementsCheap(state, rootCandidates, aiPlayer, 1)
         if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - tOrd0
         completedBestPlacement = placementList.firstOrNull()
+
+        val noiseMargin = rootScoreNoiseMargin
+        val placementNoise = if (noiseMargin > 0) {
+            IntArray(Position.TOTAL_CELLS) { random.nextInt(-noiseMargin, noiseMargin + 1) }
+        } else null
 
         for (targetDepth in 1..24) {
             val now = System.currentTimeMillis()
@@ -741,14 +834,14 @@ object WaliAi {
                 val nextState = WaliEngine.placePiece(state, pos, recordHistory = false, validate = false)
                 if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - tPlace0
 
-                val score = try {
+                val rawScore = try {
                     if (nextState.winner != null) {
                         if (nextState.winner == aiPlayer) 100_000 + targetDepth else -100_000 - targetDepth
                     } else {
                         minimaxAlphaBeta(
                             state = nextState,
                             depth = targetDepth - 1,
-                            alpha = alpha,
+                            alpha = if (placementNoise != null) alpha - noiseMargin * 2 else alpha,
                             beta = beta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
                             aiPlayer = aiPlayer,
@@ -763,6 +856,12 @@ object WaliAi {
                 } catch (e: SearchTimeoutException) {
                     interrupted = true
                     break
+                }
+
+                val score = if (placementNoise != null && rawScore in -50_000..50_000) {
+                    rawScore + placementNoise[pos.row * Position.COLS + pos.col]
+                } else {
+                    rawScore
                 }
 
                 if (score > iterationBestScore) {
@@ -807,6 +906,11 @@ object WaliAi {
 
                 if (WaliEngine.isPlacementRequired(state)) {
                     return chooseHardPlacementMove(state, random, timeBudgetMs, isCancelled)
+                }
+
+                if (lastTtPerspectivePlayer != aiPlayer) {
+                    clearTranspositionTable()
+                    lastTtPerspectivePlayer = aiPlayer
                 }
 
                 val tLegal0 = if (isProfilingEnabled) System.nanoTime() else 0L
@@ -855,9 +959,27 @@ object WaliAi {
 
                 // Pré-tri initial des coups
                 val tOrd0 = if (isProfilingEnabled) System.nanoTime() else 0L
-                var moveList = orderMovesCheap(state, allMoves, aiPlayer, 1)
+                val rootMoveCandidates = if (randomizeRootTieBreaks) allMoves.shuffled(random) else allMoves
+                var moveList = orderMovesCheap(state, rootMoveCandidates, aiPlayer, 1)
                 if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - tOrd0
                 completedBestMove = moveList.firstOrNull()
+
+                val noiseMargin = rootScoreNoiseMargin
+                val moveNoise = if (noiseMargin > 0) {
+                    IntArray(Position.TOTAL_CELLS * Position.TOTAL_CELLS) {
+                        random.nextInt(-noiseMargin, noiseMargin + 1)
+                    }
+                } else null
+                val historyHashes = gameMovementHistoryHashes
+                val rootEval = if (historyHashes.isNotEmpty()) evaluateStateDeep(state, aiPlayer) else 0
+                val repetitionScore = if (historyHashes.isNotEmpty()) {
+                    minOf(0, rootEval) - 350
+                } else 0
+                val ctx = threadContext.get()
+                ctx.currentRepetitionScore = repetitionScore
+                ctx.currentOpponentRepetitionScore = if (historyHashes.isNotEmpty()) {
+                    if (rootEval > 0) -350 else rootEval + 350
+                } else 0
 
                 for (targetDepth in 1..24) {
                     // S'il reste moins de 20ms de budget, ne pas lancer une nouvelle profondeur
@@ -890,7 +1012,8 @@ object WaliAi {
                         if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - tMove1
 
                         var moveCapTarget: Position? = null
-                        val score = try {
+                        val searchAlpha = if (moveNoise != null) alpha - noiseMargin * 2 else alpha
+                        val rawScore = try {
                             if (WaliEngine.canCapture(nextState)) {
                                 val tCap1 = if (isProfilingEnabled) System.nanoTime() else 0L
                                 val opponent = aiPlayer.opponent
@@ -900,7 +1023,7 @@ object WaliAi {
                                     minimaxAlphaBeta(
                                         state = nextState,
                                         depth = targetDepth - 1,
-                                        alpha = alpha,
+                                        alpha = searchAlpha,
                                         beta = beta,
                                         isMaximizing = false,
                                         aiPlayer = aiPlayer,
@@ -916,7 +1039,7 @@ object WaliAi {
                                     if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap1
                                     // À la racine : exploration exhaustive de TOUTES les cibles capturables
                                     var bestCapScore = Int.MIN_VALUE
-                                    var currentAlpha = alpha
+                                    var currentAlpha = searchAlpha
                                     for (target in orderedTargets) {
                                         val tCap2 = if (isProfilingEnabled) System.nanoTime() else 0L
                                         val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
@@ -945,24 +1068,35 @@ object WaliAi {
                                     bestCapScore
                                 }
                             } else {
-                                minimaxAlphaBeta(
-                                    state = nextState,
-                                    depth = targetDepth - 1,
-                                    alpha = alpha,
-                                    beta = beta,
-                                    isMaximizing = false,
-                                    aiPlayer = aiPlayer,
-                                    deadline = deadline,
-                                    isCancelled = isCancelled,
-                                    nodeCount = nodeCounter,
-                                    plyFromRoot = 1,
-                                    extensionsLeft = maxSearchExtensions,
-                                    lastMoveWasCapture = false
-                                )
+                                if (historyHashes.isNotEmpty() && computeZobristHash(nextState) in historyHashes) {
+                                    repetitionScore
+                                } else {
+                                    minimaxAlphaBeta(
+                                        state = nextState,
+                                        depth = targetDepth - 1,
+                                        alpha = searchAlpha,
+                                        beta = beta,
+                                        isMaximizing = false,
+                                        aiPlayer = aiPlayer,
+                                        deadline = deadline,
+                                        isCancelled = isCancelled,
+                                        nodeCount = nodeCounter,
+                                        plyFromRoot = 1,
+                                        extensionsLeft = maxSearchExtensions,
+                                        lastMoveWasCapture = false
+                                    )
+                                }
                             }
                         } catch (e: SearchTimeoutException) {
                             interrupted = true
                             break
+                        }
+
+                        val score = if (moveNoise != null && rawScore in -50_000..50_000) {
+                            val mIdx = (from.row * Position.COLS + from.col) * Position.TOTAL_CELLS + (to.row * Position.COLS + to.col)
+                            rawScore + moveNoise[mIdx]
+                        } else {
+                            rawScore
                         }
 
                         if (score > iterationBestScore) {
@@ -1179,10 +1313,20 @@ object WaliAi {
             )
         }
 
+        val t0 = if (isProfilingEnabled) System.nanoTime() else 0L
+        val hash = computeZobristHash(state)
+        val ctx = threadContext.get()
+        val historyHashes = ctx.gameMovementHistoryHashes
+        if (plyFromRoot > 0 && state.phase == Phase.MOVEMENT && !lastMoveWasCapture && historyHashes.isNotEmpty() && hash in historyHashes) {
+            if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - t0
+            return if (!isMaximizing) ctx.currentRepetitionScore else ctx.currentOpponentRepetitionScore
+        }
+
         // Profondeur nominale atteinte : vérification d'extension anti-horizon (Phase 6a) sans double lecture du plateau
         var effectiveDepth = depth
         var currentExtensionsLeft = extensionsLeft
         if (effectiveDepth <= 0) {
+            if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - t0
             if (currentExtensionsLeft > 0 && lastMoveWasCapture) {
                 // Extension immédiate à coût nul : un alignement vient d'être formé sur le dernier demi-coup
                 if (isProfilingEnabled) profileExtensionsTriggered++
@@ -1207,10 +1351,15 @@ object WaliAi {
             }
         }
 
-        val t0 = if (isProfilingEnabled) System.nanoTime() else 0L
-        val hash = computeZobristHash(state)
+        val tTtLookup = if (isProfilingEnabled && effectiveDepth == depth) 0L else if (isProfilingEnabled) System.nanoTime() else 0L
         val ttEntry = ttLookup(hash)
-        if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - t0
+        if (isProfilingEnabled) {
+            if (effectiveDepth == depth) {
+                profileTimeTtNanos += System.nanoTime() - t0
+            } else {
+                profileTimeTtNanos += System.nanoTime() - tTtLookup
+            }
+        }
 
         var currentAlpha = alpha
         var currentBeta = beta
@@ -1714,25 +1863,14 @@ object WaliAi {
     // ORDONNANCEMENT ULTRA-RAPIDE (KILLER, HISTORIQUE, DÉTECTION STATIQUE)
     // =========================================================================
 
-    private const val MAX_SEARCH_DEPTH = 32
-    private val killerMoves = Array(MAX_SEARCH_DEPTH) { arrayOfNulls<Pair<Position, Position>>(2) }
-    private val historyTable = Array(2) { IntArray(Position.TOTAL_CELLS * Position.TOTAL_CELLS) }
-    private val placementHistoryTable = Array(2) { IntArray(Position.TOTAL_CELLS) }
-
     fun resetMoveOrdering() {
-        for (d in 0 until MAX_SEARCH_DEPTH) {
-            killerMoves[d][0] = null
-            killerMoves[d][1] = null
-        }
-        historyTable[0].fill(0)
-        historyTable[1].fill(0)
-        placementHistoryTable[0].fill(0)
-        placementHistoryTable[1].fill(0)
+        threadContext.get().resetOrdering()
     }
 
     private fun recordBetaCutoff(player: Player, move: Pair<Position, Position>, depth: Int) {
+        val ctx = threadContext.get()
         if (depth in 0 until MAX_SEARCH_DEPTH) {
-            val k = killerMoves[depth]
+            val k = ctx.killerMoves[depth]
             if (k[0] != move) {
                 k[1] = k[0]
                 k[0] = move
@@ -1741,13 +1879,14 @@ object WaliAi {
         val fromIdx = move.first.row * Position.COLS + move.first.col
         val toIdx = move.second.row * Position.COLS + move.second.col
         val playerIdx = if (player == Player.STICKS) 0 else 1
-        historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx] += depth * depth
+        ctx.historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx] += depth * depth
     }
 
     private fun recordPlacementBetaCutoff(player: Player, pos: Position, depth: Int) {
+        val ctx = threadContext.get()
         val playerIdx = if (player == Player.STICKS) 0 else 1
         val posIdx = pos.row * Position.COLS + pos.col
-        placementHistoryTable[playerIdx][posIdx] += depth * depth
+        ctx.placementHistoryTable[playerIdx][posIdx] += depth * depth
     }
 
     private val fastLinePartnersByIdx: Array<IntArray> = Array(Position.TOTAL_CELLS) { idx ->
@@ -1774,7 +1913,7 @@ object WaliAi {
 
         // 1. Historique des coupures
         val playerIdx = if (player == Player.STICKS) 0 else 1
-        score += placementHistoryTable[playerIdx][posIdx]
+        score += threadContext.get().placementHistoryTable[playerIdx][posIdx]
 
         // 2. Contrôle central
         if (pos.row in 1..3 && pos.col in 1..4) {
@@ -1981,8 +2120,9 @@ object WaliAi {
         }
 
         // 2. Coups Killers
+        val ctx = threadContext.get()
         if (depth in 0 until MAX_SEARCH_DEPTH) {
-            val k = killerMoves[depth]
+            val k = ctx.killerMoves[depth]
             if (k[0] == move) {
                 score += 500_000
             } else if (k[1] == move) {
@@ -1994,7 +2134,7 @@ object WaliAi {
         val fromIdx = from.row * Position.COLS + from.col
         val toIdx = to.row * Position.COLS + to.col
         val playerIdx = if (player == Player.STICKS) 0 else 1
-        score += historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx]
+        score += ctx.historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx]
 
         // 4. Contrôle central
         if (to.row in 1..3 && to.col in 1..4) {

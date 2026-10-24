@@ -1536,5 +1536,41 @@ class WaliAiTest {
             resWithExt.timeOrderMovesMs + resWithExt.timeEngineMoveMs + resWithExt.timeCaptureMs + resWithExt.timeEvalMs + resWithExt.timeTtMs + resWithExt.timeLegalMovesMs + resWithExt.timeOtherMs
         )
     }
+
+    @Test
+    fun selfPlay_engineAgainstItself_measuresStatisticalNoiseBaseline() {
+        val numGames = System.getenv("WALI_SELFPLAY_GAMES")?.toIntOrNull()
+            ?: System.getProperty("wali.selfplay.games")?.toIntOrNull()
+            ?: 4
+        val budgetMs = System.getenv("WALI_SELFPLAY_BUDGET_MS")?.toLongOrNull()
+            ?: System.getProperty("wali.selfplay.budgetMs")?.toLongOrNull()
+            ?: 200L
+        val agentA = com.example.wali.ai.WaliAiBenchmark.SelfPlayAgentConfig(
+            name = "MoteurA",
+            difficulty = AiDifficulty.HARD,
+            timeBudgetMs = budgetMs,
+            useOpeningBook = false,
+            randomizeRootTieBreaks = true
+        )
+        val agentB = com.example.wali.ai.WaliAiBenchmark.SelfPlayAgentConfig(
+            name = "MoteurB",
+            difficulty = AiDifficulty.HARD,
+            timeBudgetMs = budgetMs,
+            useOpeningBook = false,
+            randomizeRootTieBreaks = true
+        )
+        val result = com.example.wali.ai.WaliAiBenchmark.runSelfPlayMatch(
+            agentA = agentA,
+            agentB = agentB,
+            numGames = numGames
+        ) { idx, winner, aIsSticks, plies ->
+            if ((idx + 1) % 10 == 0 || numGames <= 10) {
+                System.err.println("SELFPLAY_PROGRESS: game=${idx + 1}/$numGames, winner=$winner, aIsSticks=$aIsSticks, plies=$plies")
+            }
+        }
+        System.err.println(result.summary())
+        assertEquals(numGames, result.winsA + result.winsB + result.draws)
+    }
 }
+
 
