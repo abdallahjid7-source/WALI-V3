@@ -395,20 +395,26 @@ object WaliEngine {
         state: GameState,
         from: Position,
         to: Position,
-        recordHistory: Boolean = true
+        recordHistory: Boolean = true,
+        validate: Boolean = true
     ): GameState {
-        require(state.phase == Phase.MOVEMENT) { "Action impossible : la phase actuelle n'est pas MOVEMENT (${state.phase})" }
-        require(state.winner == null) { "Action impossible : la partie est terminée" }
-        require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
-        require(!isPlacementRequired(state)) {
-            "Action impossible : vous devez poser votre pion en attente sur une case disponible ce tour-ci"
+        if (validate) {
+            require(state.phase == Phase.MOVEMENT) { "Action impossible : la phase actuelle n'est pas MOVEMENT (${state.phase})" }
+            require(state.winner == null) { "Action impossible : la partie est terminée" }
+            require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
+            require(!isPlacementRequired(state)) {
+                "Action impossible : vous devez poser votre pion en attente sur une case disponible ce tour-ci"
+            }
+            require(state.board[from] == state.currentPlayer) { "Aucun pion de ${state.currentPlayer} sur la case $from" }
+            require(to in getValidMoves(state, from)) { "Déplacement invalide de $from vers $to" }
         }
-        require(state.board[from] == state.currentPlayer) { "Aucun pion de ${state.currentPlayer} sur la case $from" }
-        require(to in getValidMoves(state, from)) { "Déplacement invalide de $from vers $to" }
 
         val player = state.currentPlayer
         val opponent = player.opponent
-        val newBoard = state.board + (from to null) + (to to player)
+        val newBoard = LinkedHashMap(state.board).apply {
+            this[from] = null
+            this[to] = player
+        }
 
         // Détection des lignes de 3 nouvellement créées par ce déplacement
         val newLines = detectNewLines(state.board, newBoard, player, movedTo = to)
@@ -416,8 +422,12 @@ object WaliEngine {
 
         // Nettoyage des lignes de [player] qui ont été cassées par ce mouvement :
         // une ligne déjà utilisée qui est cassée n'est plus dans usedLines
-        val allCurrentPlayerLines = detectLines(newBoard, player).toSet()
-        val unbrokenUsedLines = state.usedLines.filter { it in allCurrentPlayerLines }.toSet()
+        val unbrokenUsedLines = if (state.usedLines.isEmpty()) {
+            emptySet()
+        } else {
+            val allCurrentPlayerLines = detectLines(newBoard, player).toSet()
+            state.usedLines.filter { it in allCurrentPlayerLines }.toSet()
+        }
 
         val updatedHistory = if (recordHistory) {
             val moveDesc = "$player déplacé de $from vers $to"
@@ -505,24 +515,34 @@ object WaliEngine {
     fun capturePiece(
         state: GameState,
         targetPosition: Position,
-        recordHistory: Boolean = true
+        recordHistory: Boolean = true,
+        validate: Boolean = true
     ): GameState {
-        require(canCapture(state)) { "Aucune capture n'est autorisée actuellement" }
+        if (validate) {
+            require(canCapture(state)) { "Aucune capture n'est autorisée actuellement" }
+            val opp = state.currentPlayer.opponent
+            require(state.board[targetPosition] == opp) {
+                "La cible en $targetPosition ne contient pas de pion adverse ($opp)"
+            }
+        }
         val player = state.currentPlayer
         val opponent = player.opponent
-        require(state.board[targetPosition] == opponent) {
-            "La cible en $targetPosition ne contient pas de pion adverse ($opponent)"
-        }
 
-        val newBoard = state.board + (targetPosition to null)
+        val newBoard = LinkedHashMap(state.board).apply {
+            this[targetPosition] = null
+        }
         val newSticks = if (opponent == Player.STICKS) state.sticksRemaining - 1 else state.sticksRemaining
         val newStones = if (opponent == Player.STONES) state.stonesRemaining - 1 else state.stonesRemaining
         val newCapturedBySticks = if (player == Player.STICKS) state.capturedBySticks + 1 else state.capturedBySticks
         val newCapturedByStones = if (player == Player.STONES) state.capturedByStones + 1 else state.capturedByStones
 
         // Si le pion adverse capturé faisait partie d'une ligne adverse enregistrée comme used, elle est maintenant cassée
-        val allValidLines = (detectLines(newBoard, Player.STICKS) + detectLines(newBoard, Player.STONES)).toSet()
-        val updatedUsedLines = state.usedLines.filter { it in allValidLines }.toSet()
+        val updatedUsedLines = if (state.usedLines.isEmpty()) {
+            emptySet()
+        } else {
+            val allValidLines = (detectLines(newBoard, Player.STICKS) + detectLines(newBoard, Player.STONES)).toSet()
+            state.usedLines.filter { it in allValidLines }.toSet()
+        }
 
         val updatedHistory = if (recordHistory) {
             val historyDesc = "$player a capturé le pion adverse en $targetPosition"
@@ -662,9 +682,52 @@ object WaliEngine {
         player: Player,
         movedTo: Position? = null
     ): List<Line> {
+        if (movedTo != null) {
+            val lines = mutableListOf<Line>()
+            val r = movedTo.row
+            val c = movedTo.col
+
+            // Vérification sur la rangée r
+            var colIdx = 0
+            while (colIdx < Position.COLS) {
+                if (boardAfter[Position(r, colIdx)] == player) {
+                    var end = colIdx
+                    while (end < Position.COLS && boardAfter[Position(r, end)] == player) {
+                        end++
+                    }
+                    val length = end - colIdx
+                    if (length == 3 && c in colIdx until end) {
+                        lines.add(Line(setOf(Position(r, colIdx), Position(r, colIdx + 1), Position(r, colIdx + 2))))
+                    }
+                    colIdx = end
+                } else {
+                    colIdx++
+                }
+            }
+
+            // Vérification sur la colonne c
+            var rowIdx = 0
+            while (rowIdx < Position.ROWS) {
+                if (boardAfter[Position(rowIdx, c)] == player) {
+                    var end = rowIdx
+                    while (end < Position.ROWS && boardAfter[Position(end, c)] == player) {
+                        end++
+                    }
+                    val length = end - rowIdx
+                    if (length == 3 && r in rowIdx until end) {
+                        lines.add(Line(setOf(Position(rowIdx, c), Position(rowIdx + 1, c), Position(rowIdx + 2, c))))
+                    }
+                    rowIdx = end
+                } else {
+                    rowIdx++
+                }
+            }
+            return lines
+        }
+
         val linesBefore = detectLines(boardBefore, player).toSet()
         val linesAfter = detectLines(boardAfter, player)
-        return linesAfter.filter { it !in linesBefore && (movedTo == null || movedTo in it.cells) }
+        return linesAfter.filter { it !in linesBefore }
     }
 
     /**

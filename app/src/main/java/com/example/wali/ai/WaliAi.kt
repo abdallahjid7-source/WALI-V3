@@ -159,10 +159,39 @@ object WaliAi {
                 } ?: capturablePositions.random(random)
             }
             AiDifficulty.HARD -> {
-                // Niveau Difficile : évaluation tactique chirurgicale des pions adverses
-                capturablePositions.maxByOrNull { pos ->
-                    evaluateTargetValueDeep(state, pos)
-                } ?: capturablePositions.random(random)
+                // Niveau Difficile : recherche minimax sur chaque cible de capture pour retenir celle
+                // menant au meilleur résultat en profondeur (et non une simple heuristique gloutonne).
+                val aiPlayer = state.currentPlayer
+                val orderedTargets = orderCaptureTargetsCheap(state, capturablePositions, aiPlayer)
+                var bestTarget: Position? = null
+                var bestScore = Int.MIN_VALUE
+                val nodeCount = IntArray(1)
+                val deadline = System.currentTimeMillis() + 400L
+
+                for (target in orderedTargets) {
+                    val afterCap = WaliEngine.capturePiece(state, target, recordHistory = false, validate = false)
+                    val score = try {
+                        minimaxAlphaBeta(
+                            state = afterCap,
+                            depth = 4,
+                            alpha = bestScore,
+                            beta = 100_000,
+                            isMaximizing = false,
+                            aiPlayer = aiPlayer,
+                            deadline = deadline,
+                            isCancelled = { false },
+                            nodeCount = nodeCount
+                        )
+                    } catch (e: Exception) {
+                        evaluateStateDeep(afterCap, aiPlayer)
+                    }
+
+                    if (score > bestScore || bestTarget == null) {
+                        bestScore = score
+                        bestTarget = target
+                    }
+                }
+                bestTarget ?: capturablePositions.maxByOrNull { evaluateTargetValueDeep(state, it) } ?: capturablePositions.random(random)
             }
         }
     }
@@ -176,14 +205,30 @@ object WaliAi {
             return emptyList()
         }
 
-        val player = state.currentPlayer
-        val playerPieces = state.board.filter { it.value == player }.keys
-        val moves = mutableListOf<Pair<Position, Position>>()
+        if (state.ruleOptions.mandatoryAlignment) {
+            val obligatory = WaliEngine.getObligatoryMoves(state)
+            if (obligatory.isNotEmpty()) {
+                val moves = ArrayList<Pair<Position, Position>>()
+                for ((from, destinations) in obligatory) {
+                    for (to in destinations) {
+                        moves.add(Pair(from, to))
+                    }
+                }
+                return moves
+            }
+        }
 
-        for (from in playerPieces) {
-            val destinations = WaliEngine.getValidMoves(state, from)
-            for (to in destinations) {
-                moves.add(from to to)
+        val player = state.currentPlayer
+        val moves = ArrayList<Pair<Position, Position>>(32)
+
+        for ((pos, piece) in state.board) {
+            if (piece == player) {
+                val neighbors = precomputedNeighbors[pos] ?: continue
+                for (neighbor in neighbors) {
+                    if (state.board[neighbor] == null) {
+                        moves.add(Pair(pos, neighbor))
+                    }
+                }
             }
         }
         return moves
@@ -383,6 +428,23 @@ object WaliAi {
     var lastSearchCompletedDepth: Int = 0
     var lastSearchNodeCount: Int = 0
 
+    var isProfilingEnabled: Boolean = false
+    var profileTimeOrderMovesNanos: Long = 0L
+    var profileTimeEngineMoveNanos: Long = 0L
+    var profileTimeEvalNanos: Long = 0L
+    var profileTimeTtNanos: Long = 0L
+    var profileTimeLegalMovesNanos: Long = 0L
+    var profileTotalNodes: Long = 0L
+
+    fun resetProfiling() {
+        profileTimeOrderMovesNanos = 0L
+        profileTimeEngineMoveNanos = 0L
+        profileTimeEvalNanos = 0L
+        profileTimeTtNanos = 0L
+        profileTimeLegalMovesNanos = 0L
+        profileTotalNodes = 0L
+    }
+
     fun clearTranspositionTable() {
         ttKeys.fill(0L)
         ttDepths.fill(0)
@@ -531,13 +593,14 @@ object WaliAi {
                 val startTime = System.currentTimeMillis()
                 val deadline = startTime + timeBudgetMs
                 val nodeCounter = IntArray(1)
+                resetMoveOrdering()
 
                 var completedBestMove: Pair<Position, Position>? = null
                 var completedBestScore = Int.MIN_VALUE
                 var lastCompletedDepth = 0
 
                 // Pré-tri initial des coups
-                var moveList = orderMoves(state, allMoves, aiPlayer)
+                var moveList = orderMovesCheap(state, allMoves, aiPlayer, 1)
                 completedBestMove = moveList.firstOrNull()
 
                 for (targetDepth in 1..24) {
@@ -565,16 +628,16 @@ object WaliAi {
                             break
                         }
 
-                        val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
-                        val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, random)
+                        val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
 
                         val score = try {
-                            minimaxAlphaBeta(
-                                state = stateAfterAction,
-                                depth = targetDepth - 1,
+                            evaluateMoveOutcome(
+                                nextState = nextState,
+                                playerWhoMoved = aiPlayer,
+                                depth = targetDepth,
                                 alpha = alpha,
                                 beta = beta,
-                                isMaximizing = false,
+                                isMaximizing = true,
                                 aiPlayer = aiPlayer,
                                 deadline = deadline,
                                 isCancelled = isCancelled,
@@ -618,6 +681,102 @@ object WaliAi {
     }
 
     /**
+     * Évalue l'issue d'un déplacement simulé en branchant sur tous les choix possibles
+     * de pion capturé si une ligne de trois a été formée (nœud de capture explicite).
+     */
+    private fun evaluateMoveOutcome(
+        nextState: GameState,
+        playerWhoMoved: Player,
+        depth: Int,
+        alpha: Int,
+        beta: Int,
+        isMaximizing: Boolean,
+        aiPlayer: Player,
+        deadline: Long,
+        isCancelled: () -> Boolean,
+        nodeCount: IntArray
+    ): Int {
+        if (!WaliEngine.canCapture(nextState)) {
+            return minimaxAlphaBeta(
+                state = nextState,
+                depth = depth - 1,
+                alpha = alpha,
+                beta = beta,
+                isMaximizing = !isMaximizing,
+                aiPlayer = aiPlayer,
+                deadline = deadline,
+                isCancelled = isCancelled,
+                nodeCount = nodeCount
+            )
+        }
+
+        val opponent = playerWhoMoved.opponent
+        val capturables = nextState.board.filter { it.value == opponent }.keys
+        if (capturables.isEmpty()) {
+            return minimaxAlphaBeta(
+                state = nextState,
+                depth = depth - 1,
+                alpha = alpha,
+                beta = beta,
+                isMaximizing = !isMaximizing,
+                aiPlayer = aiPlayer,
+                deadline = deadline,
+                isCancelled = isCancelled,
+                nodeCount = nodeCount
+            )
+        }
+
+        val orderedTargets = orderCaptureTargetsCheap(nextState, capturables, playerWhoMoved)
+        val targetsToExplore = if (orderedTargets.size > 3) orderedTargets.take(3) else orderedTargets
+
+        return if (isMaximizing) {
+            // L'IA maximise son gain parmi toutes les cibles capturables
+            var bestCapScore = Int.MIN_VALUE
+            var currentAlpha = alpha
+            for (target in targetsToExplore) {
+                val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
+                val score = minimaxAlphaBeta(
+                    state = afterCap,
+                    depth = depth - 1,
+                    alpha = currentAlpha,
+                    beta = beta,
+                    isMaximizing = false,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+                bestCapScore = maxOf(bestCapScore, score)
+                currentAlpha = maxOf(currentAlpha, score)
+                if (beta <= currentAlpha) break // Coupe Bêta sur le choix de capture
+            }
+            bestCapScore
+        } else {
+            // L'adversaire minimise le score de l'IA parmi toutes les cibles capturables
+            var bestCapScore = Int.MAX_VALUE
+            var currentBeta = beta
+            for (target in targetsToExplore) {
+                val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
+                val score = minimaxAlphaBeta(
+                    state = afterCap,
+                    depth = depth - 1,
+                    alpha = alpha,
+                    beta = currentBeta,
+                    isMaximizing = true,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+                bestCapScore = minOf(bestCapScore, score)
+                currentBeta = minOf(currentBeta, score)
+                if (currentBeta <= alpha) break // Coupe Alpha sur le choix de capture
+            }
+            bestCapScore
+        }
+    }
+
+    /**
      * Recherche Minimax Alpha-Bêta optimisée avec table de transposition Zobrist.
      * Utilise exclusivement [WaliEngine] pour chaque coup, transition et capture.
      */
@@ -634,6 +793,7 @@ object WaliAi {
     ): Int {
         // Vérification coopérative du timeout tous les 64 nœuds pour minimiser le coût système
         nodeCount[0]++
+        if (isProfilingEnabled) profileTotalNodes++
         if ((nodeCount[0] and 63) == 0) {
             if (isCancelled() || System.currentTimeMillis() >= deadline) {
                 throw SearchTimeoutException()
@@ -647,11 +807,17 @@ object WaliAi {
 
         // Profondeur atteinte : évaluation heuristique de la position
         if (depth <= 0) {
-            return evaluateStateDeep(state, aiPlayer)
+            val t4 = if (isProfilingEnabled) System.nanoTime() else 0L
+            val eval = evaluateStateDeep(state, aiPlayer)
+            if (isProfilingEnabled) profileTimeEvalNanos += System.nanoTime() - t4
+            return eval
         }
 
+        val t0 = if (isProfilingEnabled) System.nanoTime() else 0L
         val hash = computeZobristHash(state)
         val ttEntry = ttLookup(hash)
+        if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - t0
+
         var currentAlpha = alpha
         var currentBeta = beta
 
@@ -666,28 +832,75 @@ object WaliAi {
             }
         }
 
+        val t1 = if (isProfilingEnabled) System.nanoTime() else 0L
         val moves = getAllLegalMoves(state)
+        if (isProfilingEnabled) profileTimeLegalMovesNanos += System.nanoTime() - t1
+
         if (moves.isEmpty()) {
             // Aucun coup légal : le joueur actif est étouffé (défaite par blocage)
             return if (isMaximizing) -100_000 - depth else 100_000 + depth
         }
 
         val currentPlayer = if (isMaximizing) aiPlayer else aiPlayer.opponent
-        val orderedMoves = orderMovesWithTt(state, moves, currentPlayer, ttEntry?.bestMove)
-
+        val ttMove = ttEntry?.bestMove
         var bestMoveThisNode: Pair<Position, Position>? = null
 
         if (isMaximizing) {
             var maxEval = Int.MIN_VALUE
-            for ((from, to) in orderedMoves) {
-                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
-                val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, Random.Default)
-                val eval = minimaxAlphaBeta(
-                    state = stateAfterAction,
-                    depth = depth - 1,
+
+            // 1. Essai prioritaire immédiat du coup issu de la table de transposition
+            if (ttMove != null && ttMove in moves) {
+                val t3 = if (isProfilingEnabled) System.nanoTime() else 0L
+                val nextState = WaliEngine.movePiece(state, ttMove.first, ttMove.second, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
+                val eval = evaluateMoveOutcome(
+                    nextState = nextState,
+                    playerWhoMoved = currentPlayer,
+                    depth = depth,
                     alpha = currentAlpha,
                     beta = currentBeta,
-                    isMaximizing = false,
+                    isMaximizing = true,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+
+                if (eval > maxEval) {
+                    maxEval = eval
+                    bestMoveThisNode = ttMove
+                }
+                currentAlpha = maxOf(currentAlpha, eval)
+                if (currentBeta <= currentAlpha) {
+                    recordBetaCutoff(currentPlayer, ttMove, depth)
+                    val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
+                    ttStore(hash, depth, maxEval, TtBound.LOWER, bestMoveThisNode)
+                    if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
+                    return maxEval
+                }
+            }
+
+            // 2. Tri et évaluation des autres coups légaux
+            val t2 = if (isProfilingEnabled) System.nanoTime() else 0L
+            val remainingMoves = if (ttMove != null && ttMove in moves) {
+                moves.filter { it != ttMove }
+            } else {
+                moves
+            }
+            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, depth)
+            if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
+
+            for ((from, to) in orderedMoves) {
+                val t3 = if (isProfilingEnabled) System.nanoTime() else 0L
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
+                val eval = evaluateMoveOutcome(
+                    nextState = nextState,
+                    playerWhoMoved = currentPlayer,
+                    depth = depth,
+                    alpha = currentAlpha,
+                    beta = currentBeta,
+                    isMaximizing = true,
                     aiPlayer = aiPlayer,
                     deadline = deadline,
                     isCancelled = isCancelled,
@@ -699,7 +912,10 @@ object WaliAi {
                     bestMoveThisNode = from to to
                 }
                 currentAlpha = maxOf(currentAlpha, eval)
-                if (currentBeta <= currentAlpha) break // Coupe Bêta
+                if (currentBeta <= currentAlpha) {
+                    recordBetaCutoff(currentPlayer, from to to, depth)
+                    break // Coupe Bêta
+                }
             }
 
             val bound = when {
@@ -707,20 +923,67 @@ object WaliAi {
                 maxEval >= beta -> TtBound.LOWER
                 else -> TtBound.EXACT
             }
+            val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
             ttStore(hash, depth, maxEval, bound, bestMoveThisNode)
+            if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
             return maxEval
         } else {
             var minEval = Int.MAX_VALUE
             val oppPlayer = aiPlayer.opponent
-            for ((from, to) in orderedMoves) {
-                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
-                val stateAfterAction = resolveAiCapturesForSimulation(nextState, oppPlayer, AiDifficulty.HARD, Random.Default)
-                val eval = minimaxAlphaBeta(
-                    state = stateAfterAction,
-                    depth = depth - 1,
+
+            // 1. Essai prioritaire immédiat du coup issu de la table de transposition
+            if (ttMove != null && ttMove in moves) {
+                val t3 = if (isProfilingEnabled) System.nanoTime() else 0L
+                val nextState = WaliEngine.movePiece(state, ttMove.first, ttMove.second, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
+                val eval = evaluateMoveOutcome(
+                    nextState = nextState,
+                    playerWhoMoved = currentPlayer,
+                    depth = depth,
                     alpha = currentAlpha,
                     beta = currentBeta,
-                    isMaximizing = true,
+                    isMaximizing = false,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+
+                if (eval < minEval) {
+                    minEval = eval
+                    bestMoveThisNode = ttMove
+                }
+                currentBeta = minOf(currentBeta, eval)
+                if (currentBeta <= currentAlpha) {
+                    recordBetaCutoff(currentPlayer, ttMove, depth)
+                    val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
+                    ttStore(hash, depth, minEval, TtBound.UPPER, bestMoveThisNode)
+                    if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
+                    return minEval
+                }
+            }
+
+            // 2. Tri et évaluation des autres coups légaux
+            val t2 = if (isProfilingEnabled) System.nanoTime() else 0L
+            val remainingMoves = if (ttMove != null && ttMove in moves) {
+                moves.filter { it != ttMove }
+            } else {
+                moves
+            }
+            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, depth)
+            if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
+
+            for ((from, to) in orderedMoves) {
+                val t3 = if (isProfilingEnabled) System.nanoTime() else 0L
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
+                val eval = evaluateMoveOutcome(
+                    nextState = nextState,
+                    playerWhoMoved = currentPlayer,
+                    depth = depth,
+                    alpha = currentAlpha,
+                    beta = currentBeta,
+                    isMaximizing = false,
                     aiPlayer = aiPlayer,
                     deadline = deadline,
                     isCancelled = isCancelled,
@@ -732,7 +995,10 @@ object WaliAi {
                     bestMoveThisNode = from to to
                 }
                 currentBeta = minOf(currentBeta, eval)
-                if (currentBeta <= currentAlpha) break // Coupe Alpha
+                if (currentBeta <= currentAlpha) {
+                    recordBetaCutoff(currentPlayer, from to to, depth)
+                    break // Coupe Alpha
+                }
             }
 
             val bound = when {
@@ -740,22 +1006,11 @@ object WaliAi {
                 minEval >= beta -> TtBound.LOWER
                 else -> TtBound.EXACT
             }
+            val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
             ttStore(hash, depth, minEval, bound, bestMoveThisNode)
+            if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
             return minEval
         }
-    }
-
-    private fun orderMovesWithTt(
-        state: GameState,
-        moves: List<Pair<Position, Position>>,
-        player: Player,
-        ttMove: Pair<Position, Position>?
-    ): List<Pair<Position, Position>> {
-        val ordered = orderMoves(state, moves, player)
-        if (ttMove != null && ttMove in moves) {
-            return listOf(ttMove) + ordered.filter { it != ttMove }
-        }
-        return ordered
     }
 
     // =========================================================================
@@ -837,62 +1092,236 @@ object WaliAi {
         val targetOpponent = playerWhoMoved.opponent
         val capturables = state.board.filter { it.value == targetOpponent }.keys
         val bestTarget = chooseCaptureTarget(state, capturables, difficulty, random) ?: return state
-        return WaliEngine.capturePiece(state, bestTarget, recordHistory = recordHistory)
+        return WaliEngine.capturePiece(state, bestTarget, recordHistory = recordHistory, validate = false)
     }
 
     // =========================================================================
-    // ORDONNANCEMENT HEURISTIQUE DES COUPS (MOVE ORDERING)
+    // ORDONNANCEMENT ULTRA-RAPIDE (KILLER, HISTORIQUE, DÉTECTION STATIQUE)
     // =========================================================================
 
+    private const val MAX_SEARCH_DEPTH = 32
+    private val killerMoves = Array(MAX_SEARCH_DEPTH) { arrayOfNulls<Pair<Position, Position>>(2) }
+    private val historyTable = Array(2) { IntArray(Position.TOTAL_CELLS * Position.TOTAL_CELLS) }
+
+    fun resetMoveOrdering() {
+        for (d in 0 until MAX_SEARCH_DEPTH) {
+            killerMoves[d][0] = null
+            killerMoves[d][1] = null
+        }
+        historyTable[0].fill(0)
+        historyTable[1].fill(0)
+    }
+
+    private fun recordBetaCutoff(player: Player, move: Pair<Position, Position>, depth: Int) {
+        if (depth in 0 until MAX_SEARCH_DEPTH) {
+            val k = killerMoves[depth]
+            if (k[0] != move) {
+                k[1] = k[0]
+                k[0] = move
+            }
+        }
+        val fromIdx = move.first.row * Position.COLS + move.first.col
+        val toIdx = move.second.row * Position.COLS + move.second.col
+        val playerIdx = if (player == Player.STICKS) 0 else 1
+        historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx] += depth * depth
+    }
+
     /**
-     * Trie les coups légaux afin de maximiser le taux de coupure Alpha-Beta :
-     * 1. Coups formant immédiatement une ligne (capture immédiate).
-     * 2. Coups bloquant une menace directe de l'adversaire (interposition défensive).
-     * 3. Coups créant une fourchette (double menace).
-     * 4. Coups créant une menace directe d'alignement à 1 temps.
-     * 5. Coups maintenant ou étendant la mobilité (libertés).
+     * Test statique, local et ultra-rapide (zéro allocation, zéro appel à WaliEngine)
+     * déterminant si le déplacement de [from] vers [to] par [player] forme une ligne de 3.
      */
+    fun wouldFormLineStatically(
+        board: Map<Position, Player?>,
+        from: Position,
+        to: Position,
+        player: Player
+    ): Boolean {
+        val r = to.row
+        val c = to.col
+
+        // 1. Alignement horizontal sur la rangée r
+        if (c >= 2) {
+            val p1 = Position(r, c - 2)
+            val p2 = Position(r, c - 1)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (c >= 3) Position(r, c - 3) else null
+                val after = if (c + 1 < Position.COLS) Position(r, c + 1) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+        if (c in 1 until Position.COLS - 1) {
+            val p1 = Position(r, c - 1)
+            val p2 = Position(r, c + 1)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (c >= 2) Position(r, c - 2) else null
+                val after = if (c + 2 < Position.COLS) Position(r, c + 2) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+        if (c <= Position.COLS - 3) {
+            val p1 = Position(r, c + 1)
+            val p2 = Position(r, c + 2)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (c >= 1) Position(r, c - 1) else null
+                val after = if (c + 3 < Position.COLS) Position(r, c + 3) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+
+        // 2. Alignement vertical sur la colonne c
+        if (r >= 2) {
+            val p1 = Position(r - 2, c)
+            val p2 = Position(r - 1, c)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (r >= 3) Position(r - 3, c) else null
+                val after = if (r + 1 < Position.ROWS) Position(r + 1, c) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+        if (r in 1 until Position.ROWS - 1) {
+            val p1 = Position(r - 1, c)
+            val p2 = Position(r + 1, c)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (r >= 2) Position(r - 2, c) else null
+                val after = if (r + 2 < Position.ROWS) Position(r + 2, c) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+        if (r <= Position.ROWS - 3) {
+            val p1 = Position(r + 1, c)
+            val p2 = Position(r + 2, c)
+            if (p1 != from && p2 != from && board[p1] == player && board[p2] == player) {
+                val before = if (r >= 1) Position(r - 1, c) else null
+                val after = if (r + 3 < Position.ROWS) Position(r + 3, c) else null
+                val beforePlayer = before != null && before != from && board[before] == player
+                val afterPlayer = after != null && after != from && board[after] == player
+                if (!beforePlayer && !afterPlayer) return true
+            }
+        }
+
+        return false
+    }
+
+    private fun scoreMoveCheap(
+        state: GameState,
+        move: Pair<Position, Position>,
+        player: Player,
+        depth: Int
+    ): Int {
+        var score = 0
+        val from = move.first
+        val to = move.second
+
+        // 1. Coup formant un alignement (capture directe) détecté statiquement
+        if (wouldFormLineStatically(state.board, from, to, player)) {
+            score += 1_000_000
+        }
+
+        // 2. Coups Killers
+        if (depth in 0 until MAX_SEARCH_DEPTH) {
+            val k = killerMoves[depth]
+            if (k[0] == move) {
+                score += 500_000
+            } else if (k[1] == move) {
+                score += 400_000
+            }
+        }
+
+        // 3. Heuristique d'historique
+        val fromIdx = from.row * Position.COLS + from.col
+        val toIdx = to.row * Position.COLS + to.col
+        val playerIdx = if (player == Player.STICKS) 0 else 1
+        score += historyTable[playerIdx][fromIdx * Position.TOTAL_CELLS + toIdx]
+
+        // 4. Contrôle central
+        if (to.row in 1..3 && to.col in 1..4) {
+            score += 100
+        }
+
+        return score
+    }
+
+    private val linePartnersByPos: Map<Position, List<Pair<Position, Position>>> = Position.allPositions.associateWith { pos ->
+        val list = mutableListOf<Pair<Position, Position>>()
+        for (pattern in all38LinePatterns) {
+            if (pos in pattern.cells) {
+                val others = pattern.cells.filter { it != pos }
+                list.add(others[0] to others[1])
+            }
+        }
+        list
+    }
+
+    /**
+     * Ordonnancement ultra-rapide des cibles de capture pour la recherche profonde.
+     * Cible prioritaire : pion servant d'appui à un alignement adverse, puis pion très mobile, puis centre.
+     */
+    fun orderCaptureTargetsCheap(
+        state: GameState,
+        targets: Collection<Position>,
+        playerCapturing: Player
+    ): List<Position> {
+        if (targets.size <= 1) return targets.toList()
+        val opponent = playerCapturing.opponent
+        return targets.sortedByDescending { target ->
+            var score = 0
+            val neighbors = getNeighbors(target)
+
+            // 1. Appui à une menace d'alignement adverse
+            val partners = linePartnersByPos[target] ?: emptyList()
+            for (i in 0 until partners.size) {
+                val pair = partners[i]
+                val p1 = state.board[pair.first]
+                val p2 = state.board[pair.second]
+                if (p1 == opponent && p2 == opponent) {
+                    score += 2000
+                } else if (p1 == opponent || p2 == opponent) {
+                    score += 500
+                }
+            }
+
+            // 2. Mobilité (pion mobile dangereux)
+            var emptyNeighbors = 0
+            for (i in 0 until neighbors.size) {
+                if (state.board[neighbors[i]] == null) emptyNeighbors++
+            }
+            score += emptyNeighbors * 50
+
+            // 3. Centralité
+            if (target.row in 1..3 && target.col in 1..4) {
+                score += 30
+            }
+
+            score
+        }
+    }
+
+    fun orderMovesCheap(
+        state: GameState,
+        moves: List<Pair<Position, Position>>,
+        player: Player,
+        depth: Int
+    ): List<Pair<Position, Position>> {
+        if (moves.size <= 1) return moves
+        return moves.sortedByDescending { scoreMoveCheap(state, it, player, depth) }
+    }
+
     private fun orderMoves(
         state: GameState,
         moves: List<Pair<Position, Position>>,
         player: Player
     ): List<Pair<Position, Position>> {
-        val opponent = player.opponent
-        val oppImminentTargets = getImminentLineTargets(state, opponent)
-
-        return moves.sortedByDescending { (from, to) ->
-            var priority = 0
-
-            // 1. Capture immédiate permise par ce coup
-            val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
-            if (WaliEngine.canCapture(nextState) || nextState.winner == player) {
-                priority += 25_000
-            }
-
-            // 2. Blocage défensif d'une case cible adverse imminente
-            if (to in oppImminentTargets) {
-                priority += 12_000
-            }
-
-            // 3. Menaces créées par ce coup
-            val threatsCreated = countImminentLineThreats(nextState, player)
-            if (threatsCreated >= 2) {
-                priority += 8_000 // Fourchette créée !
-            } else if (threatsCreated == 1) {
-                priority += 4_000 // Menace créée !
-            }
-
-            // 4. Position centrale du point d'arrivée
-            if (to.row in 1..3 && to.col in 1..4) {
-                priority += 300
-            }
-
-            // 5. Préservation des libertés (départ d'une case étouffée)
-            val neighborsOfTo = getNeighbors(to).count { nextState.board[it] == null }
-            priority += neighborsOfTo * 80
-
-            priority
-        }
+        return orderMovesCheap(state, moves, player, 1)
     }
 
     // =========================================================================

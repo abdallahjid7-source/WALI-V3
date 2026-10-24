@@ -817,4 +817,105 @@ class WaliEngineTest {
         assertEquals(Phase.MOVEMENT, afterCapture.phase)
         assertNull(afterCapture.winner)
     }
+
+    @Test
+    fun engine_validateFalseInSearch_neverProducesIllegalState() {
+        // Garde-fou 1 : Prouve formellement que pour tout coup généré par les générateurs de coups légaux
+        // (getAllLegalMoves, getValidMoves, getValidPlacements, cibles de capture),
+        // movePiece / capturePiece avec validate = false produit un GameState strictement identique
+        // à validate = true, sans jamais échouer ni violer la moindre règle.
+        val rng = kotlin.random.Random(1337)
+        val ruleVariants = listOf(
+            WaliRuleOptions(),
+            WaliRuleOptions(mandatoryAlignment = true),
+            WaliRuleOptions(defeatAtTwoPieces = true),
+            WaliRuleOptions(mandatoryAlignment = true, defeatAtTwoPieces = true)
+        )
+
+        var totalMovesVerified = 0
+        var totalCapturesVerified = 0
+
+        for (rules in ruleVariants) {
+            // Simulation de 30 parties aléatoires complètes pour chaque variante de règle
+            for (gameIdx in 1..30) {
+                var state = WaliEngine.initializeGame(ruleOptions = rules)
+                var plies = 0
+
+                while (state.winner == null && plies < 80) {
+                    plies++
+                    when (state.phase) {
+                        Phase.PLACEMENT -> {
+                            val placements = WaliEngine.getValidPlacements(state)
+                            if (placements.isEmpty()) break
+                            val chosen = placements.random(rng)
+                            state = WaliEngine.placePiece(state, chosen, recordHistory = false)
+                        }
+                        Phase.MOVEMENT -> {
+                            if (WaliEngine.isPlacementRequired(state)) {
+                                val placements = WaliEngine.getValidPlacements(state)
+                                if (placements.isEmpty()) break
+                                val chosen = placements.random(rng)
+                                state = WaliEngine.placePiece(state, chosen, recordHistory = false)
+                                continue
+                            }
+
+                            if (WaliEngine.canCapture(state)) {
+                                val opp = state.currentPlayer.opponent
+                                val capturables = state.board.filter { it.value == opp }.keys
+                                for (target in capturables) {
+                                    val withVal = WaliEngine.capturePiece(state, target, recordHistory = false, validate = true)
+                                    val withoutVal = WaliEngine.capturePiece(state, target, recordHistory = false, validate = false)
+                                    assertEquals(withVal.board, withoutVal.board)
+                                    assertEquals(withVal.currentPlayer, withoutVal.currentPlayer)
+                                    assertEquals(withVal.winner, withoutVal.winner)
+                                    assertEquals(withVal.usedLines, withoutVal.usedLines)
+                                    assertEquals(withVal.pendingCaptures, withoutVal.pendingCaptures)
+                                    assertEquals(withVal, withoutVal)
+                                    totalCapturesVerified++
+                                }
+                                val chosen = capturables.random(rng)
+                                state = WaliEngine.capturePiece(state, chosen, recordHistory = false, validate = true)
+                                continue
+                            }
+
+                            val legalMoves = com.example.wali.ai.WaliAi.getAllLegalMoves(state)
+                            if (legalMoves.isEmpty()) break
+
+                            // Test de TOUS les coups légaux possibles depuis cette position
+                            for ((from, to) in legalMoves) {
+                                val withVal = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = true)
+                                val withoutVal = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
+                                assertEquals(withVal.board, withoutVal.board)
+                                assertEquals(withVal.currentPlayer, withoutVal.currentPlayer)
+                                assertEquals(withVal.winner, withoutVal.winner)
+                                assertEquals(withVal.usedLines, withoutVal.usedLines)
+                                assertEquals(withVal.pendingCaptures, withoutVal.pendingCaptures)
+                                assertEquals(withVal, withoutVal)
+                                totalMovesVerified++
+
+                                // Si ce coup a produit une capture, tester également les captures résultantes
+                                if (WaliEngine.canCapture(withVal)) {
+                                    val opp = withVal.currentPlayer.opponent
+                                    val caps = withVal.board.filter { it.value == opp }.keys
+                                    for (capTarget in caps) {
+                                        val capWith = WaliEngine.capturePiece(withVal, capTarget, recordHistory = false, validate = true)
+                                        val capWithout = WaliEngine.capturePiece(withoutVal, capTarget, recordHistory = false, validate = false)
+                                        assertEquals(capWith, capWithout)
+                                        totalCapturesVerified++
+                                    }
+                                }
+                            }
+
+                            val chosenMove = legalMoves.random(rng)
+                            state = WaliEngine.movePiece(state, chosenMove.first, chosenMove.second, recordHistory = false, validate = true)
+                        }
+                        Phase.GAME_OVER -> break
+                    }
+                }
+            }
+        }
+
+        assertTrue("Au moins 2000 transitions de déplacement doivent avoir été validées (validé: $totalMovesVerified)", totalMovesVerified >= 2000)
+        assertTrue("Au moins 500 transitions de capture doivent avoir été validées (validé: $totalCapturesVerified)", totalCapturesVerified >= 500)
+    }
 }

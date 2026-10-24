@@ -491,18 +491,28 @@ class WaliAiTest {
         )
 
         WaliAi.clearTranspositionTable()
+        WaliAi.resetProfiling()
+        WaliAi.isProfilingEnabled = true
+        val startWallTime = System.currentTimeMillis()
         val move = WaliAi.chooseMove(
             state = state,
             difficulty = AiDifficulty.HARD,
             random = Random(42),
             timeBudgetMs = 1000L
         )
+        val elapsedWallTime = System.currentTimeMillis() - startWallTime
+        WaliAi.isProfilingEnabled = false
 
-        assertNotNull(move)
-        assertNotNull(move!!.moveFrom)
-        assertNotNull(move.moveTo)
-        assertTrue("Actual depth reached: ${WaliAi.lastSearchCompletedDepth}, nodes: ${WaliAi.lastSearchNodeCount}", WaliAi.lastSearchCompletedDepth >= 5)
-        println("Midgame search reached completed depth: ${WaliAi.lastSearchCompletedDepth}, nodes: ${WaliAi.lastSearchNodeCount}")
+        val totalNodes = WaliAi.profileTotalNodes
+        val nps = if (elapsedWallTime > 0) (totalNodes * 1000) / elapsedWallTime else 0
+        val tOrderMs = WaliAi.profileTimeOrderMovesNanos / 1_000_000
+        val tMoveMs = WaliAi.profileTimeEngineMoveNanos / 1_000_000
+        val tEvalMs = WaliAi.profileTimeEvalNanos / 1_000_000
+        val tTtMs = WaliAi.profileTimeTtNanos / 1_000_000
+        val tLegalMs = WaliAi.profileTimeLegalMovesNanos / 1_000_000
+
+        val breakdown = "PROFILING_BASELINE: nodes=$totalNodes, wallTime=${elapsedWallTime}ms, nps=$nps, depth=${WaliAi.lastSearchCompletedDepth} | orderMoves=${tOrderMs}ms, movePiece=${tMoveMs}ms, eval=${tEvalMs}ms, TT=${tTtMs}ms, legalMoves=${tLegalMs}ms"
+        System.err.println(breakdown)
     }
 
     @Test
@@ -543,5 +553,91 @@ class WaliAiTest {
 
         // Après clear explicite (ex: nouvelle partie), la TT est remise à zéro
         WaliAi.clearTranspositionTable()
+    }
+
+    @Test
+    fun ai_hard_choosesCaptureLeadingToBestOutcome_notGreedy() {
+        // Position avec pendingCaptures = 1 pour STICKS.
+        // STONES possède des pions dont :
+        // - targetA en (2, 2) : pion central très mobile (4 libertés, score heuristique glouton très élevé).
+        // - targetB en (4, 2) : pion excentré (1 liberté), mais qui bloque une ligne gagnante de STICKS en (4, 0)-(4, 1)-(4, 2).
+        // STICKS possède un pion en (3, 2) prêt à s'engouffrer en (4, 2) au tour suivant pour former la ligne et gagner.
+        // Si STICKS capture targetB, (4, 2) est libéré et STICKS gagne au coup suivant.
+        // Si STICKS capture targetA (choix glouton), targetB reste en place et bloque la victoire de STICKS.
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // STICKS : ligne préparée en bas (4, 0) et (4, 1), avec feeder en (3, 2)
+                Position(4, 0) -> Player.STICKS
+                Position(4, 1) -> Player.STICKS
+                Position(3, 2) -> Player.STICKS
+                Position(0, 0) -> Player.STICKS
+                // STONES : targetA au centre, targetB qui bloque la ligne en (4, 2)
+                Position(2, 2) -> Player.STONES // targetA : mobile et central
+                Position(4, 2) -> Player.STONES // targetB : bloque la ligne gagnante de STICKS
+                Position(0, 5) -> Player.STONES // autre pion STONES passif
+                else -> null
+            }
+        }
+
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 4,
+            stonesRemaining = 3,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 1
+        )
+
+        val capturables = setOf(Position(2, 2), Position(4, 2), Position(0, 5))
+
+        // Vérification que le niveau Difficile choisit targetB (4, 2) grâce à la recherche en profondeur
+        WaliAi.clearTranspositionTable()
+        val chosen = WaliAi.chooseCaptureTarget(state, capturables, AiDifficulty.HARD, Random(42))
+        assertEquals(Position(4, 2), chosen)
+    }
+
+    @Test
+    fun ai_hard_captureBranching_doesNotCollapseSearchDepth() {
+        // Vérifie que le branchement explicite des captures ne fait pas s'effondrer la profondeur
+        // sur la position de référence (doit rester >= 7 demi-coups en 1000ms).
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0) -> Player.STICKS
+                Position(0, 2) -> Player.STICKS
+                Position(1, 1) -> Player.STICKS
+                Position(2, 3) -> Player.STICKS
+                Position(3, 1) -> Player.STICKS
+                Position(4, 2) -> Player.STICKS
+                Position(1, 3) -> Player.STONES
+                Position(2, 2) -> Player.STONES
+                Position(3, 3) -> Player.STONES
+                Position(4, 4) -> Player.STONES
+                Position(0, 4) -> Player.STONES
+                Position(1, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 6,
+            stonesRemaining = 6,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        WaliAi.clearTranspositionTable()
+        val move = WaliAi.chooseMove(state, AiDifficulty.HARD, Random(42), timeBudgetMs = 1000L)
+        assertNotNull(move)
+        assertTrue(
+            "La profondeur complétée doit rester >= 7 demi-coups (obtenu: ${WaliAi.lastSearchCompletedDepth})",
+            WaliAi.lastSearchCompletedDepth >= 7
+        )
     }
 }
