@@ -192,6 +192,18 @@ object WaliAi {
         )
     }
 
+    /**
+     * Score de connectivité structurelle précalculé pour chaque case (0..29) :
+     * combine le nombre de motifs de lignes de 3 contenant la case (2..6)
+     * et le nombre de voisins orthogonaux (2..4).
+     */
+    val fastSquareConnectivityScore: IntArray = IntArray(Position.TOTAL_CELLS) { idx ->
+        val pos = Position(idx / Position.COLS, idx % Position.COLS)
+        val lineCount = all38LinePatterns.count { pos in it.cells } // 2 à 6
+        val degree = fastNeighbors[idx].size                        // 2 à 4
+        (lineCount - 2) * 12 + (degree - 2) * 18
+    }
+
     fun hasEmptyNeighbor(flatBoard: Array<Player?>, cellIdx: Int): Boolean {
         val neighbors = fastNeighbors[cellIdx]
         for (i in 0 until neighbors.size) {
@@ -540,12 +552,20 @@ object WaliAi {
      */
     var captureBranchingCapDeep: Int = 4
 
+    /**
+     * Plafond d'extension anti-horizon cumulée par branche (Phase 6a).
+     * Permet de prolonger de 1 à 2 plis une feuille tactiquement instable
+     * (alignement formé, capture en attente, asphyxie imminente).
+     */
+    var maxSearchExtensions: Int = 2
+
     var isProfilingEnabled: Boolean = false
     var profileTimeOrderMovesNanos: Long = 0L
     var profileTimeEngineMoveNanos: Long = 0L
     var profileTimeEvalNanos: Long = 0L
     var profileTimeTtNanos: Long = 0L
     var profileTimeLegalMovesNanos: Long = 0L
+    var profileTimeCaptureNanos: Long = 0L
     var profileTotalNodes: Long = 0L
 
     fun resetProfiling() {
@@ -554,6 +574,7 @@ object WaliAi {
         profileTimeEvalNanos = 0L
         profileTimeTtNanos = 0L
         profileTimeLegalMovesNanos = 0L
+        profileTimeCaptureNanos = 0L
         profileTotalNodes = 0L
     }
 
@@ -719,7 +740,9 @@ object WaliAi {
                             deadline = deadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCounter,
-                            plyFromRoot = 1
+                            plyFromRoot = 1,
+                            extensionsLeft = maxSearchExtensions,
+                            lastMoveWasCapture = false
                         )
                     }
                 } catch (e: SearchTimeoutException) {
@@ -771,12 +794,16 @@ object WaliAi {
                     return chooseHardPlacementMove(state, random, timeBudgetMs, isCancelled)
                 }
 
+                val tLegal0 = if (isProfilingEnabled) System.nanoTime() else 0L
                 val allMoves = getAllLegalMoves(state)
+                if (isProfilingEnabled) profileTimeLegalMovesNanos += System.nanoTime() - tLegal0
                 if (allMoves.isEmpty()) return null
 
                 // 1. Détection immédiate des coups gagnants à 1 temps
                 for ((from, to) in allMoves) {
-                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                    val tMove0 = if (isProfilingEnabled) System.nanoTime() else 0L
+                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
+                    if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - tMove0
                     if (nextState.winner == aiPlayer) {
                         lastSearchCompletedDepth = 1
                         lastSearchNodeCount = 1
@@ -784,16 +811,19 @@ object WaliAi {
                         return AiMove(moveFrom = from, moveTo = to, captureTarget = null)
                     }
                     if (WaliEngine.canCapture(nextState)) {
+                        val tCap0 = if (isProfilingEnabled) System.nanoTime() else 0L
                         val oppPieces = nextState.board.filter { it.value == aiPlayer.opponent }.keys
                         for (target in oppPieces) {
-                            val afterCapture = WaliEngine.capturePiece(nextState, target, recordHistory = false)
+                            val afterCapture = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
                             if (afterCapture.winner == aiPlayer) {
+                                if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap0
                                 lastSearchCompletedDepth = 1
                                 lastSearchNodeCount = 1
                                 lastPlannedCaptureTarget = target
                                 return AiMove(moveFrom = from, moveTo = to, captureTarget = target)
                             }
                         }
+                        if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap0
                     }
                 }
 
@@ -809,7 +839,9 @@ object WaliAi {
                 var lastCompletedDepth = 0
 
                 // Pré-tri initial des coups
+                val tOrd0 = if (isProfilingEnabled) System.nanoTime() else 0L
                 var moveList = orderMovesCheap(state, allMoves, aiPlayer, 1)
+                if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - tOrd0
                 completedBestMove = moveList.firstOrNull()
 
                 for (targetDepth in 1..24) {
@@ -838,14 +870,18 @@ object WaliAi {
                             break
                         }
 
+                        val tMove1 = if (isProfilingEnabled) System.nanoTime() else 0L
                         val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false, validate = false)
+                        if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - tMove1
 
                         var moveCapTarget: Position? = null
                         val score = try {
                             if (WaliEngine.canCapture(nextState)) {
+                                val tCap1 = if (isProfilingEnabled) System.nanoTime() else 0L
                                 val opponent = aiPlayer.opponent
                                 val capturables = nextState.board.filter { it.value == opponent }.keys
                                 if (capturables.isEmpty()) {
+                                    if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap1
                                     minimaxAlphaBeta(
                                         state = nextState,
                                         depth = targetDepth - 1,
@@ -856,15 +892,20 @@ object WaliAi {
                                         deadline = deadline,
                                         isCancelled = isCancelled,
                                         nodeCount = nodeCounter,
-                                        plyFromRoot = 1
+                                        plyFromRoot = 1,
+                                        extensionsLeft = maxSearchExtensions,
+                                        lastMoveWasCapture = true
                                     )
                                 } else {
                                     val orderedTargets = orderCaptureTargetsCheap(nextState, capturables, aiPlayer)
+                                    if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap1
                                     // À la racine : exploration exhaustive de TOUTES les cibles capturables
                                     var bestCapScore = Int.MIN_VALUE
                                     var currentAlpha = alpha
                                     for (target in orderedTargets) {
+                                        val tCap2 = if (isProfilingEnabled) System.nanoTime() else 0L
                                         val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
+                                        if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap2
                                         val s = minimaxAlphaBeta(
                                             state = afterCap,
                                             depth = targetDepth - 1,
@@ -875,7 +916,9 @@ object WaliAi {
                                             deadline = deadline,
                                             isCancelled = isCancelled,
                                             nodeCount = nodeCounter,
-                                            plyFromRoot = 1
+                                            plyFromRoot = 1,
+                                            extensionsLeft = maxSearchExtensions,
+                                            lastMoveWasCapture = true
                                         )
                                         if (s > bestCapScore || moveCapTarget == null) {
                                             bestCapScore = s
@@ -897,7 +940,9 @@ object WaliAi {
                                     deadline = deadline,
                                     isCancelled = isCancelled,
                                     nodeCount = nodeCounter,
-                                    plyFromRoot = 1
+                                    plyFromRoot = 1,
+                                    extensionsLeft = maxSearchExtensions,
+                                    lastMoveWasCapture = false
                                 )
                             }
                         } catch (e: SearchTimeoutException) {
@@ -943,6 +988,7 @@ object WaliAi {
     /**
      * Évalue l'issue d'un déplacement simulé en branchant sur tous les choix possibles
      * de pion capturé si une ligne de trois a été formée (nœud de capture explicite).
+     * Instrumenté avec sa propre sonde [profileTimeCaptureNanos] (hors descente récursive).
      */
     private fun evaluateMoveOutcome(
         nextState: GameState,
@@ -955,7 +1001,8 @@ object WaliAi {
         deadline: Long,
         isCancelled: () -> Boolean,
         nodeCount: IntArray,
-        plyFromRoot: Int
+        plyFromRoot: Int,
+        extensionsLeft: Int = maxSearchExtensions
     ): Int {
         if (!WaliEngine.canCapture(nextState)) {
             return minimaxAlphaBeta(
@@ -968,13 +1015,17 @@ object WaliAi {
                 deadline = deadline,
                 isCancelled = isCancelled,
                 nodeCount = nodeCount,
-                plyFromRoot = plyFromRoot + 1
+                plyFromRoot = plyFromRoot + 1,
+                extensionsLeft = extensionsLeft,
+                lastMoveWasCapture = false
             )
         }
 
+        val tCap0 = if (isProfilingEnabled) System.nanoTime() else 0L
         val opponent = playerWhoMoved.opponent
         val capturables = nextState.board.filter { it.value == opponent }.keys
         if (capturables.isEmpty()) {
+            if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap0
             return minimaxAlphaBeta(
                 state = nextState,
                 depth = depth - 1,
@@ -985,7 +1036,9 @@ object WaliAi {
                 deadline = deadline,
                 isCancelled = isCancelled,
                 nodeCount = nodeCount,
-                plyFromRoot = plyFromRoot + 1
+                plyFromRoot = plyFromRoot + 1,
+                extensionsLeft = extensionsLeft,
+                lastMoveWasCapture = true
             )
         }
 
@@ -997,13 +1050,16 @@ object WaliAi {
         } else {
             orderedTargets.take(captureBranchingCapDeep)
         }
+        if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap0
 
         return if (isMaximizing) {
             // L'IA maximise son gain parmi toutes les cibles capturables
             var bestCapScore = Int.MIN_VALUE
             var currentAlpha = alpha
             for (target in targetsToExplore) {
+                val tCap1 = if (isProfilingEnabled) System.nanoTime() else 0L
                 val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap1
                 val score = minimaxAlphaBeta(
                     state = afterCap,
                     depth = depth - 1,
@@ -1014,7 +1070,9 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot + 1
+                    plyFromRoot = plyFromRoot + 1,
+                    extensionsLeft = extensionsLeft,
+                    lastMoveWasCapture = true
                 )
                 bestCapScore = maxOf(bestCapScore, score)
                 currentAlpha = maxOf(currentAlpha, score)
@@ -1026,7 +1084,9 @@ object WaliAi {
             var bestCapScore = Int.MAX_VALUE
             var currentBeta = beta
             for (target in targetsToExplore) {
+                val tCap1 = if (isProfilingEnabled) System.nanoTime() else 0L
                 val afterCap = WaliEngine.capturePiece(nextState, target, recordHistory = false, validate = false)
+                if (isProfilingEnabled) profileTimeCaptureNanos += System.nanoTime() - tCap1
                 val score = minimaxAlphaBeta(
                     state = afterCap,
                     depth = depth - 1,
@@ -1037,7 +1097,9 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot + 1
+                    plyFromRoot = plyFromRoot + 1,
+                    extensionsLeft = extensionsLeft,
+                    lastMoveWasCapture = true
                 )
                 bestCapScore = minOf(bestCapScore, score)
                 currentBeta = minOf(currentBeta, score)
@@ -1048,10 +1110,11 @@ object WaliAi {
     }
 
     /**
-     * Recherche Minimax Alpha-Bêta optimisée avec table de transposition Zobrist.
+     * Recherche Minimax Alpha-Bêta optimisée avec table de transposition Zobrist
+     * et extensions anti-horizon bornées (Phase 6a).
      * Utilise exclusivement [WaliEngine] pour chaque coup, transition et capture.
      */
-    private fun minimaxAlphaBeta(
+    internal fun minimaxAlphaBeta(
         state: GameState,
         depth: Int,
         alpha: Int,
@@ -1061,7 +1124,9 @@ object WaliAi {
         deadline: Long,
         isCancelled: () -> Boolean,
         nodeCount: IntArray,
-        plyFromRoot: Int = 0
+        plyFromRoot: Int = 0,
+        extensionsLeft: Int = maxSearchExtensions,
+        lastMoveWasCapture: Boolean = false
     ): Int {
         // Vérification coopérative du timeout tous les 64 nœuds pour minimiser le coût système
         nodeCount[0]++
@@ -1074,15 +1139,54 @@ object WaliAi {
 
         // État terminal (victoire ou défaite)
         if (state.winner != null) {
-            return if (state.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+            val bonusDepth = maxOf(0, depth)
+            return if (state.winner == aiPlayer) 100_000 + bonusDepth else -100_000 - bonusDepth
         }
 
-        // Profondeur atteinte : évaluation heuristique de la position
-        if (depth <= 0) {
-            val t4 = if (isProfilingEnabled) System.nanoTime() else 0L
-            val eval = evaluateStateDeep(state, aiPlayer)
-            if (isProfilingEnabled) profileTimeEvalNanos += System.nanoTime() - t4
-            return eval
+        // Si une capture est directement en attente sur l'état courant, la résoudre obligatoirement
+        if (state.pendingCaptures > 0) {
+            val nextDepth = if (depth <= 0) 1 else depth
+            val nextExt = if (depth <= 0) maxOf(0, extensionsLeft - 1) else extensionsLeft
+            return evaluateMoveOutcome(
+                nextState = state,
+                playerWhoMoved = state.currentPlayer,
+                depth = nextDepth,
+                alpha = alpha,
+                beta = beta,
+                isMaximizing = (state.currentPlayer == aiPlayer),
+                aiPlayer = aiPlayer,
+                deadline = deadline,
+                isCancelled = isCancelled,
+                nodeCount = nodeCount,
+                plyFromRoot = plyFromRoot,
+                extensionsLeft = nextExt
+            )
+        }
+
+        // Profondeur nominale atteinte : vérification d'extension anti-horizon (Phase 6a) sans double lecture du plateau
+        var effectiveDepth = depth
+        var currentExtensionsLeft = extensionsLeft
+        if (effectiveDepth <= 0) {
+            if (currentExtensionsLeft > 0 && lastMoveWasCapture) {
+                // Extension immédiate à coût nul : un alignement vient d'être formé sur le dernier demi-coup
+                effectiveDepth = 1
+                currentExtensionsLeft -= 1
+            } else {
+                val t4 = if (isProfilingEnabled) System.nanoTime() else 0L
+                val evalOrExtend = evaluateLeafOrSignalLowMobilityExtension(
+                    state = state,
+                    aiPlayer = aiPlayer,
+                    canExtendOnLowMobility = (currentExtensionsLeft > 0 && state.phase == Phase.MOVEMENT)
+                )
+                if (isProfilingEnabled) profileTimeEvalNanos += System.nanoTime() - t4
+
+                if (evalOrExtend == EXTEND_LOW_MOBILITY_SENTINEL) {
+                    effectiveDepth = 1
+                    currentExtensionsLeft -= 1
+                } else {
+                    return evalOrExtend
+                }
+            }
         }
 
         val t0 = if (isProfilingEnabled) System.nanoTime() else 0L
@@ -1093,7 +1197,7 @@ object WaliAi {
         var currentAlpha = alpha
         var currentBeta = beta
 
-        if (ttEntry != null && ttEntry.depth >= depth) {
+        if (ttEntry != null && ttEntry.depth >= effectiveDepth) {
             when (ttEntry.bound) {
                 TtBound.EXACT -> return ttEntry.score
                 TtBound.LOWER -> currentAlpha = maxOf(currentAlpha, ttEntry.score)
@@ -1116,7 +1220,7 @@ object WaliAi {
                     if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
                     return minimaxAlphaBeta(
                         state = transState,
-                        depth = depth,
+                        depth = effectiveDepth,
                         alpha = currentAlpha,
                         beta = currentBeta,
                         isMaximizing = (transState.currentPlayer == aiPlayer),
@@ -1124,10 +1228,12 @@ object WaliAi {
                         deadline = deadline,
                         isCancelled = isCancelled,
                         nodeCount = nodeCount,
-                        plyFromRoot = plyFromRoot
+                        plyFromRoot = plyFromRoot,
+                        extensionsLeft = currentExtensionsLeft,
+                        lastMoveWasCapture = false
                     )
                 } else {
-                    return if (isMaximizing) -100_000 - depth else 100_000 + depth
+                    return if (isMaximizing) -100_000 - effectiveDepth else 100_000 + effectiveDepth
                 }
             }
 
@@ -1142,11 +1248,11 @@ object WaliAi {
                     val nextState = WaliEngine.placePiece(state, ttPlacement, recordHistory = false, validate = false)
                     if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
                     val eval = if (nextState.winner != null) {
-                        if (nextState.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+                        if (nextState.winner == aiPlayer) 100_000 + effectiveDepth else -100_000 - effectiveDepth
                     } else {
                         minimaxAlphaBeta(
                             state = nextState,
-                            depth = depth - 1,
+                            depth = effectiveDepth - 1,
                             alpha = currentAlpha,
                             beta = currentBeta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
@@ -1154,7 +1260,9 @@ object WaliAi {
                             deadline = deadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCount,
-                            plyFromRoot = plyFromRoot + 1
+                            plyFromRoot = plyFromRoot + 1,
+                            extensionsLeft = currentExtensionsLeft,
+                            lastMoveWasCapture = false
                         )
                     }
                     if (eval > maxEval) {
@@ -1163,9 +1271,9 @@ object WaliAi {
                     }
                     currentAlpha = maxOf(currentAlpha, eval)
                     if (currentBeta <= currentAlpha) {
-                        recordPlacementBetaCutoff(currentPlayer, ttPlacement, depth)
+                        recordPlacementBetaCutoff(currentPlayer, ttPlacement, effectiveDepth)
                         val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                        ttStore(hash, depth, maxEval, TtBound.LOWER, bestMove = null, bestPlacement = bestPlacementThisNode)
+                        ttStore(hash, effectiveDepth, maxEval, TtBound.LOWER, bestMove = null, bestPlacement = bestPlacementThisNode)
                         if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                         return maxEval
                     }
@@ -1177,7 +1285,7 @@ object WaliAi {
                 } else {
                     placements
                 }
-                val orderedPlacements = orderPlacementsCheap(state, remainingPlacements, currentPlayer, depth)
+                val orderedPlacements = orderPlacementsCheap(state, remainingPlacements, currentPlayer, effectiveDepth)
                 if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
 
                 for (pos in orderedPlacements) {
@@ -1185,11 +1293,11 @@ object WaliAi {
                     val nextState = WaliEngine.placePiece(state, pos, recordHistory = false, validate = false)
                     if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
                     val eval = if (nextState.winner != null) {
-                        if (nextState.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+                        if (nextState.winner == aiPlayer) 100_000 + effectiveDepth else -100_000 - effectiveDepth
                     } else {
                         minimaxAlphaBeta(
                             state = nextState,
-                            depth = depth - 1,
+                            depth = effectiveDepth - 1,
                             alpha = currentAlpha,
                             beta = currentBeta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
@@ -1197,7 +1305,9 @@ object WaliAi {
                             deadline = deadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCount,
-                            plyFromRoot = plyFromRoot + 1
+                            plyFromRoot = plyFromRoot + 1,
+                            extensionsLeft = currentExtensionsLeft,
+                            lastMoveWasCapture = false
                         )
                     }
                     if (eval > maxEval) {
@@ -1206,7 +1316,7 @@ object WaliAi {
                     }
                     currentAlpha = maxOf(currentAlpha, eval)
                     if (currentBeta <= currentAlpha) {
-                        recordPlacementBetaCutoff(currentPlayer, pos, depth)
+                        recordPlacementBetaCutoff(currentPlayer, pos, effectiveDepth)
                         break
                     }
                 }
@@ -1217,7 +1327,7 @@ object WaliAi {
                     else -> TtBound.EXACT
                 }
                 val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                ttStore(hash, depth, maxEval, bound, bestMove = null, bestPlacement = bestPlacementThisNode)
+                ttStore(hash, effectiveDepth, maxEval, bound, bestMove = null, bestPlacement = bestPlacementThisNode)
                 if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                 return maxEval
             } else {
@@ -1227,11 +1337,11 @@ object WaliAi {
                     val nextState = WaliEngine.placePiece(state, ttPlacement, recordHistory = false, validate = false)
                     if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
                     val eval = if (nextState.winner != null) {
-                        if (nextState.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+                        if (nextState.winner == aiPlayer) 100_000 + effectiveDepth else -100_000 - effectiveDepth
                     } else {
                         minimaxAlphaBeta(
                             state = nextState,
-                            depth = depth - 1,
+                            depth = effectiveDepth - 1,
                             alpha = currentAlpha,
                             beta = currentBeta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
@@ -1239,7 +1349,9 @@ object WaliAi {
                             deadline = deadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCount,
-                            plyFromRoot = plyFromRoot + 1
+                            plyFromRoot = plyFromRoot + 1,
+                            extensionsLeft = currentExtensionsLeft,
+                            lastMoveWasCapture = false
                         )
                     }
                     if (eval < minEval) {
@@ -1248,9 +1360,9 @@ object WaliAi {
                     }
                     currentBeta = minOf(currentBeta, eval)
                     if (currentBeta <= currentAlpha) {
-                        recordPlacementBetaCutoff(currentPlayer, ttPlacement, depth)
+                        recordPlacementBetaCutoff(currentPlayer, ttPlacement, effectiveDepth)
                         val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                        ttStore(hash, depth, minEval, TtBound.UPPER, bestMove = null, bestPlacement = bestPlacementThisNode)
+                        ttStore(hash, effectiveDepth, minEval, TtBound.UPPER, bestMove = null, bestPlacement = bestPlacementThisNode)
                         if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                         return minEval
                     }
@@ -1262,7 +1374,7 @@ object WaliAi {
                 } else {
                     placements
                 }
-                val orderedPlacements = orderPlacementsCheap(state, remainingPlacements, currentPlayer, depth)
+                val orderedPlacements = orderPlacementsCheap(state, remainingPlacements, currentPlayer, effectiveDepth)
                 if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
 
                 for (pos in orderedPlacements) {
@@ -1270,11 +1382,11 @@ object WaliAi {
                     val nextState = WaliEngine.placePiece(state, pos, recordHistory = false, validate = false)
                     if (isProfilingEnabled) profileTimeEngineMoveNanos += System.nanoTime() - t3
                     val eval = if (nextState.winner != null) {
-                        if (nextState.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+                        if (nextState.winner == aiPlayer) 100_000 + effectiveDepth else -100_000 - effectiveDepth
                     } else {
                         minimaxAlphaBeta(
                             state = nextState,
-                            depth = depth - 1,
+                            depth = effectiveDepth - 1,
                             alpha = currentAlpha,
                             beta = currentBeta,
                             isMaximizing = (nextState.currentPlayer == aiPlayer),
@@ -1282,7 +1394,9 @@ object WaliAi {
                             deadline = deadline,
                             isCancelled = isCancelled,
                             nodeCount = nodeCount,
-                            plyFromRoot = plyFromRoot + 1
+                            plyFromRoot = plyFromRoot + 1,
+                            extensionsLeft = currentExtensionsLeft,
+                            lastMoveWasCapture = false
                         )
                     }
                     if (eval < minEval) {
@@ -1291,7 +1405,7 @@ object WaliAi {
                     }
                     currentBeta = minOf(currentBeta, eval)
                     if (currentBeta <= currentAlpha) {
-                        recordPlacementBetaCutoff(currentPlayer, pos, depth)
+                        recordPlacementBetaCutoff(currentPlayer, pos, effectiveDepth)
                         break
                     }
                 }
@@ -1302,7 +1416,7 @@ object WaliAi {
                     else -> TtBound.EXACT
                 }
                 val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                ttStore(hash, depth, minEval, bound, bestMove = null, bestPlacement = bestPlacementThisNode)
+                ttStore(hash, effectiveDepth, minEval, bound, bestMove = null, bestPlacement = bestPlacementThisNode)
                 if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                 return minEval
             }
@@ -1314,7 +1428,7 @@ object WaliAi {
 
         if (moves.isEmpty()) {
             // Aucun coup légal : le joueur actif est étouffé (défaite par blocage)
-            return if (isMaximizing) -100_000 - depth else 100_000 + depth
+            return if (isMaximizing) -100_000 - effectiveDepth else 100_000 + effectiveDepth
         }
 
         val currentPlayer = if (isMaximizing) aiPlayer else aiPlayer.opponent
@@ -1332,7 +1446,7 @@ object WaliAi {
                 val eval = evaluateMoveOutcome(
                     nextState = nextState,
                     playerWhoMoved = currentPlayer,
-                    depth = depth,
+                    depth = effectiveDepth,
                     alpha = currentAlpha,
                     beta = currentBeta,
                     isMaximizing = true,
@@ -1340,7 +1454,8 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot
+                    plyFromRoot = plyFromRoot,
+                    extensionsLeft = currentExtensionsLeft
                 )
 
                 if (eval > maxEval) {
@@ -1349,9 +1464,9 @@ object WaliAi {
                 }
                 currentAlpha = maxOf(currentAlpha, eval)
                 if (currentBeta <= currentAlpha) {
-                    recordBetaCutoff(currentPlayer, ttMove, depth)
+                    recordBetaCutoff(currentPlayer, ttMove, effectiveDepth)
                     val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                    ttStore(hash, depth, maxEval, TtBound.LOWER, bestMoveThisNode)
+                    ttStore(hash, effectiveDepth, maxEval, TtBound.LOWER, bestMoveThisNode)
                     if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                     return maxEval
                 }
@@ -1364,7 +1479,7 @@ object WaliAi {
             } else {
                 moves
             }
-            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, depth)
+            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, effectiveDepth)
             if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
 
             for ((from, to) in orderedMoves) {
@@ -1374,7 +1489,7 @@ object WaliAi {
                 val eval = evaluateMoveOutcome(
                     nextState = nextState,
                     playerWhoMoved = currentPlayer,
-                    depth = depth,
+                    depth = effectiveDepth,
                     alpha = currentAlpha,
                     beta = currentBeta,
                     isMaximizing = true,
@@ -1382,7 +1497,8 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot
+                    plyFromRoot = plyFromRoot,
+                    extensionsLeft = currentExtensionsLeft
                 )
 
                 if (eval > maxEval) {
@@ -1391,7 +1507,7 @@ object WaliAi {
                 }
                 currentAlpha = maxOf(currentAlpha, eval)
                 if (currentBeta <= currentAlpha) {
-                    recordBetaCutoff(currentPlayer, from to to, depth)
+                    recordBetaCutoff(currentPlayer, from to to, effectiveDepth)
                     break // Coupe Bêta
                 }
             }
@@ -1402,12 +1518,11 @@ object WaliAi {
                 else -> TtBound.EXACT
             }
             val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-            ttStore(hash, depth, maxEval, bound, bestMoveThisNode)
+            ttStore(hash, effectiveDepth, maxEval, bound, bestMoveThisNode)
             if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
             return maxEval
         } else {
             var minEval = Int.MAX_VALUE
-            val oppPlayer = aiPlayer.opponent
 
             // 1. Essai prioritaire immédiat du coup issu de la table de transposition
             if (ttMove != null && ttMove in moves) {
@@ -1417,7 +1532,7 @@ object WaliAi {
                 val eval = evaluateMoveOutcome(
                     nextState = nextState,
                     playerWhoMoved = currentPlayer,
-                    depth = depth,
+                    depth = effectiveDepth,
                     alpha = currentAlpha,
                     beta = currentBeta,
                     isMaximizing = false,
@@ -1425,7 +1540,8 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot
+                    plyFromRoot = plyFromRoot,
+                    extensionsLeft = currentExtensionsLeft
                 )
 
                 if (eval < minEval) {
@@ -1434,9 +1550,9 @@ object WaliAi {
                 }
                 currentBeta = minOf(currentBeta, eval)
                 if (currentBeta <= currentAlpha) {
-                    recordBetaCutoff(currentPlayer, ttMove, depth)
+                    recordBetaCutoff(currentPlayer, ttMove, effectiveDepth)
                     val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-                    ttStore(hash, depth, minEval, TtBound.UPPER, bestMoveThisNode)
+                    ttStore(hash, effectiveDepth, minEval, TtBound.UPPER, bestMoveThisNode)
                     if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
                     return minEval
                 }
@@ -1449,7 +1565,7 @@ object WaliAi {
             } else {
                 moves
             }
-            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, depth)
+            val orderedMoves = orderMovesCheap(state, remainingMoves, currentPlayer, effectiveDepth)
             if (isProfilingEnabled) profileTimeOrderMovesNanos += System.nanoTime() - t2
 
             for ((from, to) in orderedMoves) {
@@ -1459,7 +1575,7 @@ object WaliAi {
                 val eval = evaluateMoveOutcome(
                     nextState = nextState,
                     playerWhoMoved = currentPlayer,
-                    depth = depth,
+                    depth = effectiveDepth,
                     alpha = currentAlpha,
                     beta = currentBeta,
                     isMaximizing = false,
@@ -1467,7 +1583,8 @@ object WaliAi {
                     deadline = deadline,
                     isCancelled = isCancelled,
                     nodeCount = nodeCount,
-                    plyFromRoot = plyFromRoot
+                    plyFromRoot = plyFromRoot,
+                    extensionsLeft = currentExtensionsLeft
                 )
 
                 if (eval < minEval) {
@@ -1487,7 +1604,7 @@ object WaliAi {
                 else -> TtBound.EXACT
             }
             val tStore = if (isProfilingEnabled) System.nanoTime() else 0L
-            ttStore(hash, depth, minEval, bound, bestMoveThisNode)
+            ttStore(hash, effectiveDepth, minEval, bound, bestMoveThisNode)
             if (isProfilingEnabled) profileTimeTtNanos += System.nanoTime() - tStore
             return minEval
         }
@@ -1891,32 +2008,40 @@ object WaliAi {
     ): List<Position> {
         if (targets.size <= 1) return targets.toList()
         val opponent = playerCapturing.opponent
+        val flatBoard = arrayOfNulls<Player>(Position.TOTAL_CELLS)
+        for ((pos, piece) in state.board) {
+            if (piece != null) {
+                flatBoard[pos.row * Position.COLS + pos.col] = piece
+            }
+        }
         return targets.sortedByDescending { target ->
             var score = 0
-            val neighbors = getNeighbors(target)
+            val targetIdx = target.row * Position.COLS + target.col
+            val neighbors = fastNeighbors[targetIdx]
 
             // 1. Appui à une menace d'alignement adverse
-            val partners = linePartnersByPos[target] ?: emptyList()
-            for (i in 0 until partners.size) {
-                val pair = partners[i]
-                val p1 = state.board[pair.first]
-                val p2 = state.board[pair.second]
+            val partners = fastLinePartnersByIdx[targetIdx]
+            var i = 0
+            while (i < partners.size) {
+                val p1 = flatBoard[partners[i]]
+                val p2 = flatBoard[partners[i + 1]]
                 if (p1 == opponent && p2 == opponent) {
                     score += 2000
                 } else if (p1 == opponent || p2 == opponent) {
                     score += 500
                 }
+                i += 2
             }
 
             // 2. Mobilité (pion mobile dangereux)
             var emptyNeighbors = 0
-            for (i in 0 until neighbors.size) {
-                if (state.board[neighbors[i]] == null) emptyNeighbors++
+            for (k in 0 until neighbors.size) {
+                if (flatBoard[neighbors[k]] == null) emptyNeighbors++
             }
             score += emptyNeighbors * 50
 
             // 3. Centralité
-            if (target.row in 1..3 && target.col in 1..4) {
+            if (fastIsCenter[targetIdx]) {
                 score += 30
             }
 
@@ -1953,7 +2078,7 @@ object WaliAi {
     // =========================================================================
 
     /**
-     * Évaluation globale experte d'un état de jeu en phase de déplacement.
+     * Évaluation globale experte d'un état de jeu en phase de pose et de déplacement.
      * Hiérarchie stricte des poids :
      * 1. Matériel (1 200 pts/pion, bonus d'élimination en fin de partie)
      * 2. Doubles moulins (deux alignements partageant un pion : 4 500 pts)
@@ -1962,8 +2087,22 @@ object WaliAi {
      * 5. Alignements potentiels (menaces directes à 1 temps et fourchettes)
      * 6. Navettes simples (va-et-vient actif)
      * 7. Contrôle positionnel du centre
+     * 8. Phase 6b (Phase.PLACEMENT) :
+     *    - Libertés futures fortement pondérées (cases vides distinctes accessibles, pions à mobilité garantie >= 2 libertés, pénalité sévère des pions à 0 ou 1 liberté)
+     *    - Contrôle des cases à forte connectivité (nombre de lignes de 3 + degré orthogonal)
+     *    - Pénalité d'agglutination de pions alliés dans une zone fermée (risque d'auto-étouffement collectif)
      */
+    private const val EXTEND_LOW_MOBILITY_SENTINEL = Int.MIN_VALUE + 7
+
     internal fun evaluateStateDeep(state: GameState, aiPlayer: Player): Int {
+        return evaluateLeafOrSignalLowMobilityExtension(state, aiPlayer, canExtendOnLowMobility = false)
+    }
+
+    internal fun evaluateLeafOrSignalLowMobilityExtension(
+        state: GameState,
+        aiPlayer: Player,
+        canExtendOnLowMobility: Boolean
+    ): Int {
         if (state.winner != null) {
             return if (state.winner == aiPlayer) 100_000 else -100_000
         }
@@ -1981,38 +2120,87 @@ object WaliAi {
             }
         }
 
-        // 1. Matériel (poids prépondérant)
+        // 1. Matériel (poids prépondérant + incapacité d'aligner sous 3 pions en déplacement)
         var score = (aiCount - oppCount) * 1200
-        if (state.phase == Phase.MOVEMENT && oppCount <= 3) {
-            score += (4 - oppCount) * 600
+        if (state.phase == Phase.MOVEMENT) {
+            if (oppCount <= 3) score += (4 - oppCount) * 600
+            if (aiCount <= 3) score -= (4 - aiCount) * 600
+            if (oppCount <= 2) score += (3 - oppCount) * 2000
+            if (aiCount <= 2) score -= (3 - aiCount) * 2000
         }
 
-        // 2. Mobilité locale & pions bloqués (calcul direct sans allocation)
+        // 2. Mobilité locale, libertés futures, connectivité & agglutination (calcul direct sans allocation)
         var aiLiberties = 0
         var oppLiberties = 0
         var aiBlockedPieces = 0
         var oppBlockedPieces = 0
         var aiCenterPieces = 0
         var oppCenterPieces = 0
+        var aiDistinctEmptyMask = 0
+        var oppDistinctEmptyMask = 0
+        var aiOneLibertyPieces = 0
+        var oppOneLibertyPieces = 0
+        var aiSafeMobilePieces = 0
+        var oppSafeMobilePieces = 0
+        var aiConnectivityScore = 0
+        var oppConnectivityScore = 0
+        var aiAgglutinationPenalty = 0
+        var oppAgglutinationPenalty = 0
 
         for (idx in 0 until Position.TOTAL_CELLS) {
             val piece = flatBoard[idx] ?: continue
             val neighbors = fastNeighbors[idx]
             var liberties = 0
+            var friendlyNeighbors = 0
+            var emptyMaskLocal = 0
             for (k in 0 until neighbors.size) {
-                if (flatBoard[neighbors[k]] == null) liberties++
+                val nIdx = neighbors[k]
+                val nPiece = flatBoard[nIdx]
+                if (nPiece == null) {
+                    liberties++
+                    emptyMaskLocal = emptyMaskLocal or (1 shl nIdx)
+                } else if (nPiece == piece) {
+                    friendlyNeighbors++
+                }
             }
 
             val isCenter = fastIsCenter[idx]
+            val conn = fastSquareConnectivityScore[idx]
+            val agglutination = if (friendlyNeighbors >= 2) {
+                val base = (friendlyNeighbors - 1) * 95
+                val closedZoneExtra = if (liberties == 0) 220 else if (liberties == 1) 120 else 0
+                base + closedZoneExtra
+            } else if (friendlyNeighbors == 1 && liberties == 0) {
+                130
+            } else {
+                0
+            }
+
             if (piece == aiPlayer) {
                 aiLiberties += liberties
+                aiDistinctEmptyMask = aiDistinctEmptyMask or emptyMaskLocal
                 if (liberties == 0) aiBlockedPieces++
+                else if (liberties == 1) aiOneLibertyPieces++
+                else aiSafeMobilePieces++
                 if (isCenter) aiCenterPieces++
+                aiConnectivityScore += conn
+                aiAgglutinationPenalty += agglutination
             } else {
                 oppLiberties += liberties
+                oppDistinctEmptyMask = oppDistinctEmptyMask or emptyMaskLocal
                 if (liberties == 0) oppBlockedPieces++
+                else if (liberties == 1) oppOneLibertyPieces++
+                else oppSafeMobilePieces++
                 if (isCenter) oppCenterPieces++
+                oppConnectivityScore += conn
+                oppAgglutinationPenalty += agglutination
             }
+        }
+
+        // Phase 6a : Si la feuille est en très faible mobilité (asphyxie imminente, 1..2 libertés),
+        // signaler l'extension de recherche sans avoir à reconstruire flatBoard deux fois.
+        if (canExtendOnLowMobility && ((aiLiberties in 1..2) || (oppLiberties in 1..2))) {
+            return EXTEND_LOW_MOBILITY_SENTINEL
         }
 
         // Détection de mat par étouffement (aucun coup possible) en phase de déplacement
@@ -2140,6 +2328,39 @@ object WaliAi {
 
         // 7. Contrôle central
         score += (aiCenterPieces - oppCenterPieces) * 15
+
+        // 8. Phase 6b : Évaluation de pose orientée libertés futures, connectivité et anti-agglutination
+        if (state.phase == Phase.PLACEMENT || state.sticksPendingPlacement > 0 || state.stonesPendingPlacement > 0) {
+            val aiDistinctLiberties = Integer.bitCount(aiDistinctEmptyMask)
+            val oppDistinctLiberties = Integer.bitCount(oppDistinctEmptyMask)
+
+            // 8a. Terme de liberté future fortement pondéré :
+            score += (aiDistinctLiberties - oppDistinctLiberties) * 85
+            score -= aiBlockedPieces * 450
+            score += oppBlockedPieces * 400
+            score -= aiOneLibertyPieces * 140
+            score += oppOneLibertyPieces * 120
+            score += (aiSafeMobilePieces - oppSafeMobilePieces) * 90
+
+            // Alerte d'asphyxie globale à l'approche de la transition :
+            if (aiCount >= 3) {
+                val aiMobilePieces = aiCount - aiBlockedPieces
+                if (aiMobilePieces == 0) score -= 3000
+                else if (aiSafeMobilePieces == 0 && aiDistinctLiberties <= 1) score -= 1800
+            }
+            if (oppCount >= 3) {
+                val oppMobilePieces = oppCount - oppBlockedPieces
+                if (oppMobilePieces == 0) score += 2500
+                else if (oppSafeMobilePieces == 0 && oppDistinctLiberties <= 1) score += 1500
+            }
+
+            // 8b. Contrôle des cases à forte connectivité (lignes de 3 + degré orthogonal)
+            score += (aiConnectivityScore - oppConnectivityScore)
+
+            // 8c. Pénalité d'agglutination de pions alliés dans une zone fermée
+            score -= aiAgglutinationPenalty
+            score += oppAgglutinationPenalty
+        }
 
         return score
     }

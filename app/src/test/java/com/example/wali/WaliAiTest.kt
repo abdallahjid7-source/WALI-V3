@@ -4,6 +4,7 @@ import com.example.wali.ai.AiDifficulty
 import com.example.wali.ai.WaliAi
 import com.example.wali.engine.WaliEngine
 import com.example.wali.model.GameState
+import com.example.wali.model.Line
 import com.example.wali.model.Phase
 import com.example.wali.model.Player
 import com.example.wali.model.Position
@@ -700,7 +701,7 @@ class WaliAiTest {
         assertEquals(
             "Somme des temps égale au temps mural",
             result.wallTimeMs,
-            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
+            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeCaptureMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
         )
     }
 
@@ -710,6 +711,10 @@ class WaliAiTest {
         System.err.println("BENCHMARK_PLACEMENT_EARLY: ${result.summary()}")
         assertTrue(result.completedDepth >= 3)
         assertTrue(result.totalNodes > 0)
+        assertEquals(
+            result.wallTimeMs,
+            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeCaptureMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
+        )
     }
 
     @Test
@@ -718,6 +723,10 @@ class WaliAiTest {
         System.err.println("BENCHMARK_PLACEMENT_MID: ${result.summary()}")
         assertTrue(result.completedDepth >= 3)
         assertTrue(result.totalNodes > 0)
+        assertEquals(
+            result.wallTimeMs,
+            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeCaptureMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
+        )
     }
 
     @Test
@@ -726,6 +735,10 @@ class WaliAiTest {
         System.err.println("BENCHMARK_PLACEMENT_TRANSITION: ${result.summary()}")
         assertTrue(result.completedDepth >= 4)
         assertTrue(result.totalNodes > 0)
+        assertEquals(
+            result.wallTimeMs,
+            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeCaptureMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
+        )
     }
 
     @Test
@@ -804,22 +817,6 @@ class WaliAiTest {
         // Position de fin de pose (22 pions posés : 11 STICKS et 11 STONES).
         // Il reste 1 pion à poser pour STICKS (trait à STICKS) puis 1 pion pour STONES,
         // après quoi transitionToMovement donne le premier coup de déplacement à STICKS (et teste si STICKS est bloqué).
-        //
-        // Grille 5x6 (X = STICKS, O = STONES, . = vide) :
-        // Row 0: X  X  O  O  .  .
-        // Row 1: X  O  X  X  O  O
-        // Row 2: O  X  X  O  .  .
-        // Row 3: X  X  O  .  .  .
-        // Row 4: X  O  X  O  .  O
-        //
-        // Les 11 pions existants de STICKS sont tous enfermés à 0 liberté.
-        // Les 8 cases vides sont réparties en :
-        // - Une poche-piège de 2 cases en haut à droite : (0, 4) et (0, 5), bordée par deux pions STONES en (0, 2) et (0, 3).
-        //   Une heuristique myope (comme evaluatePlacementPos) est attirée par (0, 4) qui bloque la paire adverse (0, 2)-(0, 3).
-        //   Mais si STICKS pose en (0, 4) ou (0, 5), STONES répond immédiatement sur l'autre case de la poche au 24e coup,
-        //   et transitionToMovement déclare STICKS perdant par blocage immédiat (winner = Player.STONES, phase = Phase.GAME_OVER) !
-        // - Une poche de survie de 6 cases en bas à droite : (2, 4), (2, 5), (3, 3), (3, 4), (3, 5), (4, 4).
-        //   Si STICKS pose dans cette poche, il conserve plusieurs libertés après le 24e coup de STONES et survit à la transition.
         val board = Position.allPositions.associateWith { pos ->
             when (pos) {
                 // 11 pions STICKS existants tous enfermés (0 voisin vide)
@@ -884,6 +881,201 @@ class WaliAiTest {
         }
     }
 
+    @Test
+    fun ai_hard_avoidsHorizonEffect_onPendingCapture() {
+        // Phase 6a : Position où STICKS (7 pions) a deux coups de capture immédiate :
+        // 1. Le coup piège (2,1) -> (2,0) complète (0,0)-(1,0)-(2,0) tout en conservant la ligne (0,0)-(0,1)-(0,2),
+        //    ce qui crée un Double Moulin de pivot (0,0) (+4500 pts) et capture 1 pion STONES.
+        //    À profondeur fixe 1 sans extension anti-horizon (maxSearchExtensions = 0), la recherche s'arrête
+        //    juste après cette capture (depth = 0) et évalue (2,1) -> (2,0) très au-dessus du coup sûr.
+        //    Mais juste après l'horizon, la case (2,1) libérée permet à STONES (en (1,1) ou (2,2)/(3,1))
+        //    de jouer en (2,1), formant immédiatement (2,1)-(2,2)-(2,3) ou (2,1)-(3,1)-(4,1) et capturant
+        //    le pivot (0,0) de STICKS (destruction du double moulin et perte matérielle immédiate) !
+        // 2. Le coup sûr (0,2) -> (1,2) complète (1,2)-(1,3)-(1,4), capture 1 pion STONES, maintient le verrou
+        //    en (2,1) ET enferme complètement le pion STONES en (1,1) sur ses 4 côtés.
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0), Position(0, 1), Position(0, 2),
+                Position(1, 0), Position(2, 1),
+                Position(1, 3), Position(1, 4) -> Player.STICKS
+                Position(1, 1),
+                Position(2, 2), Position(2, 3),
+                Position(3, 1), Position(4, 1) -> Player.STONES
+                else -> null
+            }
+        }
+        val existingRow0Line = Line(setOf(Position(0, 0), Position(0, 1), Position(0, 2)))
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 7,
+            stonesRemaining = 5,
+            winner = null,
+            usedLines = setOf(existingRow0Line),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        val trapMoveState = WaliEngine.movePiece(state, Position(2, 1), Position(2, 0), recordHistory = false)
+        val safeMoveState = WaliEngine.movePiece(state, Position(0, 2), Position(1, 2), recordHistory = false)
+        assertTrue("Le coup piège forme un alignement avec capture en attente", trapMoveState.pendingCaptures > 0)
+        assertTrue("Le coup sûr forme un alignement avec capture en attente", safeMoveState.pendingCaptures > 0)
+
+        try {
+            // 1. Preuve de l'effet d'horizon à profondeur fixe 1 sans extension (maxSearchExtensions = 0) :
+            WaliAi.maxSearchExtensions = 0
+            WaliAi.clearTranspositionTable()
+            val nodesNoExt = IntArray(1)
+            val deadline = System.currentTimeMillis() + 5000L
+            val trapScoreNoExt = WaliAi.minimaxAlphaBeta(
+                state = trapMoveState,
+                depth = 1,
+                alpha = Int.MIN_VALUE + 1000,
+                beta = Int.MAX_VALUE,
+                isMaximizing = true,
+                aiPlayer = Player.STICKS,
+                deadline = deadline,
+                isCancelled = { false },
+                nodeCount = nodesNoExt,
+                plyFromRoot = 1,
+                extensionsLeft = 0,
+                lastMoveWasCapture = false
+            )
+            WaliAi.clearTranspositionTable()
+            val safeScoreNoExt = WaliAi.minimaxAlphaBeta(
+                state = safeMoveState,
+                depth = 1,
+                alpha = Int.MIN_VALUE + 1000,
+                beta = Int.MAX_VALUE,
+                isMaximizing = true,
+                aiPlayer = Player.STICKS,
+                deadline = deadline,
+                isCancelled = { false },
+                nodeCount = nodesNoExt,
+                plyFromRoot = 1,
+                extensionsLeft = 0,
+                lastMoveWasCapture = false
+            )
+            assertTrue(
+                "Sans extension anti-horizon à profondeur 1, le coup piège ($trapScoreNoExt) paraît meilleur que le coup sûr ($safeScoreNoExt)",
+                trapScoreNoExt > safeScoreNoExt
+            )
+
+            // 2. Avec extensions anti-horizon actives (maxSearchExtensions = 2), même à profondeur nominale 1,
+            // l'extension prolonge la feuille instable et voit la contre-capture immédiate juste après l'horizon :
+            WaliAi.maxSearchExtensions = 2
+            WaliAi.clearTranspositionTable()
+            val nodesWithExt = IntArray(1)
+            val trapScoreWithExt = WaliAi.minimaxAlphaBeta(
+                state = trapMoveState,
+                depth = 1,
+                alpha = Int.MIN_VALUE + 1000,
+                beta = Int.MAX_VALUE,
+                isMaximizing = true,
+                aiPlayer = Player.STICKS,
+                deadline = deadline,
+                isCancelled = { false },
+                nodeCount = nodesWithExt,
+                plyFromRoot = 1,
+                extensionsLeft = 2,
+                lastMoveWasCapture = false
+            )
+            assertTrue(
+                "Avec extension anti-horizon, la perte de pion juste après l'horizon est détectée et inverse le jugement (trapScoreWithExt=$trapScoreWithExt < safeScoreNoExt=$safeScoreNoExt, trapScoreNoExt=$trapScoreNoExt)",
+                trapScoreWithExt < safeScoreNoExt && trapScoreWithExt <= trapScoreNoExt - 1200
+            )
+
+            // 3. L'IA Difficile rejette le coup piège (2,1)->(2,0) et joue le coup sûr (0,2)->(1,2)
+            WaliAi.clearTranspositionTable()
+            val chosen = WaliAi.chooseMove(state, AiDifficulty.HARD, Random(42), timeBudgetMs = 300L)
+            assertNotNull(chosen)
+            assertEquals(Position(0, 2), chosen!!.moveFrom)
+            assertEquals(Position(1, 2), chosen.moveTo)
+        } finally {
+            WaliAi.maxSearchExtensions = 2
+        }
+    }
+
+    @Test
+    fun ai_hard_placementPrefersStructureWithFutureLiberties() {
+        // Phase 6b : Vérifie que l'évaluation et la recherche en Phase.PLACEMENT privilégient fortement
+        // les structures à fortes libertés futures et forte connectivité, et pénalisent l'agglutination
+        // en zone fermée (risque d'auto-étouffement à la transition).
+        val crampedBoard = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // 4 pions STICKS agglutinés dans le coin supérieur gauche sans libertés
+                Position(0, 0), Position(0, 1), Position(1, 0), Position(2, 0) -> Player.STICKS
+                // 4 pions STONES entourant la zone
+                Position(0, 2), Position(1, 1), Position(2, 1), Position(3, 0) -> Player.STONES
+                else -> null
+            }
+        }
+        val openBoard = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // 4 pions STICKS sur des carrefours centraux à haute connectivité et nombreuses libertés futures
+                Position(1, 2), Position(2, 3), Position(3, 2), Position(2, 4) -> Player.STICKS
+                // Les 4 mêmes pions STONES
+                Position(0, 2), Position(1, 1), Position(2, 1), Position(3, 0) -> Player.STONES
+                else -> null
+            }
+        }
+
+        val crampedState = GameState(
+            board = crampedBoard,
+            currentPlayer = Player.STICKS,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 8,
+            stonesRemaining = 8,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+        val openState = crampedState.copy(board = openBoard)
+
+        val crampedEval = WaliAi.evaluateStateDeep(crampedState, Player.STICKS)
+        val openEval = WaliAi.evaluateStateDeep(openState, Player.STICKS)
+        assertTrue(
+            "La structure ouverte à fortes libertés futures ($openEval) doit surpasser largement la structure agglutinée ($crampedEval)",
+            openEval > crampedEval + 2500
+        )
+
+        // Test de décision en milieu de pose : STICKS ne doit pas s'auto-enfermer dans la poche fermée (0,1)
+        val decisionBoard = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0), Position(1, 0) -> Player.STICKS
+                Position(0, 2), Position(1, 1), Position(2, 0) -> Player.STONES
+                Position(1, 3) -> Player.STICKS
+                else -> null
+            }
+        }
+        val decisionState = GameState(
+            board = decisionBoard,
+            currentPlayer = Player.STICKS,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 9,
+            stonesRemaining = 9,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        WaliAi.clearTranspositionTable()
+        val move = WaliAi.chooseMove(decisionState, AiDifficulty.HARD, Random(42), timeBudgetMs = 300L)
+        assertNotNull(move)
+        val chosenPos = move!!.placement!!
+        assertTrue("L'IA Difficile doit rejeter la case d'auto-étouffement (0,1)", chosenPos != Position(0, 1))
+
+        val afterPlacement = WaliEngine.placePiece(decisionState, chosenPos, recordHistory = false)
+        val chosenLiberties = getNeighborsLegacy(chosenPos).count { afterPlacement.board[it] == null }
+        assertTrue(
+            "La case choisie ($chosenPos) doit préserver au moins 2 libertés orthogonales futures (obtenu: $chosenLiberties)",
+            chosenLiberties >= 2
+        )
+    }
+
     private fun getNeighborsLegacy(pos: Position): List<Position> {
         val list = mutableListOf<Position>()
         if (pos.row > 0) list.add(Position(pos.row - 1, pos.col))
@@ -910,8 +1102,11 @@ class WaliAiTest {
         val oppCount = state.piecesOnBoard(opponent)
 
         var score = (aiCount - oppCount) * 1200
-        if (state.phase == Phase.MOVEMENT && oppCount <= 3) {
-            score += (4 - oppCount) * 600
+        if (state.phase == Phase.MOVEMENT) {
+            if (oppCount <= 3) score += (4 - oppCount) * 600
+            if (aiCount <= 3) score -= (4 - aiCount) * 600
+            if (oppCount <= 2) score += (3 - oppCount) * 2000
+            if (aiCount <= 2) score -= (3 - aiCount) * 2000
         }
 
         var aiLiberties = 0
@@ -920,24 +1115,62 @@ class WaliAiTest {
         var oppBlockedPieces = 0
         var aiCenterPieces = 0
         var oppCenterPieces = 0
+        val aiDistinctEmptySet = mutableSetOf<Position>()
+        val oppDistinctEmptySet = mutableSetOf<Position>()
+        var aiOneLibertyPieces = 0
+        var oppOneLibertyPieces = 0
+        var aiSafeMobilePieces = 0
+        var oppSafeMobilePieces = 0
+        var aiConnectivityScore = 0
+        var oppConnectivityScore = 0
+        var aiAgglutinationPenalty = 0
+        var oppAgglutinationPenalty = 0
 
         for ((pos, piece) in state.board) {
             if (piece == null) continue
             var liberties = 0
+            var friendlyNeighbors = 0
             val neighbors = getNeighborsLegacy(pos)
             for (i in 0 until neighbors.size) {
-                if (state.board[neighbors[i]] == null) liberties++
+                val nPos = neighbors[i]
+                val nPiece = state.board[nPos]
+                if (nPiece == null) {
+                    liberties++
+                    if (piece == aiPlayer) aiDistinctEmptySet.add(nPos) else oppDistinctEmptySet.add(nPos)
+                } else if (nPiece == piece) {
+                    friendlyNeighbors++
+                }
+            }
+
+            val idx = pos.row * Position.COLS + pos.col
+            val conn = WaliAi.fastSquareConnectivityScore[idx]
+            val agglutination = if (friendlyNeighbors >= 2) {
+                val base = (friendlyNeighbors - 1) * 95
+                val closedZoneExtra = if (liberties == 0) 220 else if (liberties == 1) 120 else 0
+                base + closedZoneExtra
+            } else if (friendlyNeighbors == 1 && liberties == 0) {
+                130
+            } else {
+                0
             }
 
             val isCenter = pos.row in 1..3 && pos.col in 1..4
             if (piece == aiPlayer) {
                 aiLiberties += liberties
                 if (liberties == 0) aiBlockedPieces++
+                else if (liberties == 1) aiOneLibertyPieces++
+                else aiSafeMobilePieces++
                 if (isCenter) aiCenterPieces++
+                aiConnectivityScore += conn
+                aiAgglutinationPenalty += agglutination
             } else {
                 oppLiberties += liberties
                 if (liberties == 0) oppBlockedPieces++
+                else if (liberties == 1) oppOneLibertyPieces++
+                else oppSafeMobilePieces++
                 if (isCenter) oppCenterPieces++
+                oppConnectivityScore += conn
+                oppAgglutinationPenalty += agglutination
             }
         }
 
@@ -1064,6 +1297,33 @@ class WaliAiTest {
         score -= oppShuttles * 400
 
         score += (aiCenterPieces - oppCenterPieces) * 15
+
+        if (state.phase == Phase.PLACEMENT || state.sticksPendingPlacement > 0 || state.stonesPendingPlacement > 0) {
+            val aiDistinctLiberties = aiDistinctEmptySet.size
+            val oppDistinctLiberties = oppDistinctEmptySet.size
+
+            score += (aiDistinctLiberties - oppDistinctLiberties) * 85
+            score -= aiBlockedPieces * 450
+            score += oppBlockedPieces * 400
+            score -= aiOneLibertyPieces * 140
+            score += oppOneLibertyPieces * 120
+            score += (aiSafeMobilePieces - oppSafeMobilePieces) * 90
+
+            if (aiCount >= 3) {
+                val aiMobilePieces = aiCount - aiBlockedPieces
+                if (aiMobilePieces == 0) score -= 3000
+                else if (aiSafeMobilePieces == 0 && aiDistinctLiberties <= 1) score -= 1800
+            }
+            if (oppCount >= 3) {
+                val oppMobilePieces = oppCount - oppBlockedPieces
+                if (oppMobilePieces == 0) score += 2500
+                else if (oppSafeMobilePieces == 0 && oppDistinctLiberties <= 1) score += 1500
+            }
+
+            score += (aiConnectivityScore - oppConnectivityScore)
+            score -= aiAgglutinationPenalty
+            score += oppAgglutinationPenalty
+        }
 
         return score
     }

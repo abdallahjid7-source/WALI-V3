@@ -21,12 +21,13 @@ data class BenchmarkResult(
     val timeEvalMs: Long,
     val timeTtMs: Long,
     val timeLegalMovesMs: Long,
+    val timeCaptureMs: Long,
     val timeOtherMs: Long
 ) {
     fun summary(): String {
         return "nodes=$totalNodes, wallTime=${wallTimeMs}ms, nps=$nodesPerSecond, depth=$completedDepth | " +
-               "orderMoves=${timeOrderMovesMs}ms, movePiece=${timeEngineMoveMs}ms, eval=${timeEvalMs}ms, " +
-               "TT=${timeTtMs}ms, legalMoves=${timeLegalMovesMs}ms, other=${timeOtherMs}ms"
+               "orderMoves=${timeOrderMovesMs}ms, movePiece=${timeEngineMoveMs}ms, capture=${timeCaptureMs}ms, " +
+               "eval=${timeEvalMs}ms, TT=${timeTtMs}ms, legalMoves=${timeLegalMovesMs}ms, other=${timeOtherMs}ms"
     }
 }
 
@@ -212,8 +213,9 @@ object WaliAiBenchmark {
         val tEval = WaliAi.profileTimeEvalNanos / 1_000_000L
         val tTt = WaliAi.profileTimeTtNanos / 1_000_000L
         val tLegal = WaliAi.profileTimeLegalMovesNanos / 1_000_000L
+        val tCapture = WaliAi.profileTimeCaptureNanos / 1_000_000L
 
-        val instrumentedSum = tOrder + tMove + tEval + tTt + tLegal
+        val instrumentedSum = tOrder + tMove + tEval + tTt + tLegal + tCapture
         val tOther = maxOf(0L, elapsedWall - instrumentedSum)
 
         return BenchmarkResult(
@@ -226,6 +228,7 @@ object WaliAiBenchmark {
             timeEvalMs = tEval,
             timeTtMs = tTt,
             timeLegalMovesMs = tLegal,
+            timeCaptureMs = tCapture,
             timeOtherMs = tOther
         )
     }
