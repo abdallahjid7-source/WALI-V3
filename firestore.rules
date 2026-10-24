@@ -19,9 +19,11 @@ service cloud.firestore {
                     && (request.auth == null || request.resource.data.creatorUid == request.auth.uid);
 
       // Mise à jour :
-      // Trois cas autorisés :
       // 1. Un second joueur rejoint une partie en attente (status -> 'ongoing', opponentUid défini)
-      // 2. Un joueur participant met à jour l'état du jeu ou déclare un abandon/forfait
+      // 2a. Chemin « coup de jeu / proposition de match nul » : réservé exclusivement au participant dont c'est le tour
+      // 2b. Chemin « réponse au match nul » : réservé exclusivement à l'adversaire du proposant lorsqu'une offre est en attente,
+      //     limité aux seuls champs écrits par respondToDraw et imposant drawOfferedBy == null
+      // 2c. Chemin « abandon / forfait » : passage vers status == 'abandoned' par l'un des deux participants sans toucher gameStateJson
       // 3. Revanche dans le même salon depuis un état 'finished' ou 'abandoned' vers 'ongoing' (ou demande/annulation en attente)
       allow update: if (
         // Cas 1 : Rejoindre une partie
@@ -31,27 +33,51 @@ service cloud.firestore {
          && request.resource.data.opponentUid.size() > 0
          && resource.data.creatorUid != request.resource.data.opponentUid)
         ||
-        // Cas 2 : Action de jeu (gameStateJson), proposition/réponse de match nul (drawOfferedBy, drawOfferTurnCount)
-        // ou abandon par l'un des deux participants enregistrés (spectateurs et non-participants exclus).
-        // Pendant qu'une offre de match nul est en attente, les deux participants sont autorisés à écrire
-        // drawOfferedBy et drawOfferTurnCount (notamment l'adversaire qui répond alors que le tour appartient encore au proposant).
+        // Cas 2a : Coup de jeu (gameStateJson) ou proposition de match nul — strictement réservé au joueur dont c'est le tour.
+        // Si une offre était déjà en attente, la seule valeur autorisée pour drawOfferedBy est null (aucune réattribution).
+        (resource.data.status == 'ongoing'
+         && request.resource.data.creatorUid == resource.data.creatorUid
+         && request.resource.data.opponentUid == resource.data.opponentUid
+         && request.auth != null
+         && ((request.auth.uid == resource.data.creatorUid
+              && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.creatorPlayer + '".*'))
+             || (request.auth.uid == resource.data.opponentUid
+                 && resource.data.gameStateJson.matches('.*"currentPlayer":"' + resource.data.opponentPlayer + '".*')))
+         && ((resource.data.get('drawOfferedBy', null) == null
+              && (request.resource.data.get('drawOfferedBy', null) == null
+                  || request.resource.data.drawOfferedBy == request.auth.uid))
+             || (resource.data.get('drawOfferedBy', null) != null
+                 && request.resource.data.get('drawOfferedBy', null) == null))
+         && (!('drawOfferTurnCount' in request.resource.data)
+             || request.resource.data.drawOfferTurnCount is int))
+        ||
+        // Cas 2b : Réponse au match nul — strictement réservé à l'adversaire du proposant lorsqu'une offre est en attente,
+        // limité aux champs écrits par respondToDraw et imposant la remise à null de drawOfferedBy.
         (resource.data.status == 'ongoing'
          && request.resource.data.creatorUid == resource.data.creatorUid
          && request.resource.data.opponentUid == resource.data.opponentUid
          && request.auth != null
          && (request.auth.uid == resource.data.creatorUid
              || request.auth.uid == resource.data.opponentUid)
-         && (!('drawOfferedBy' in request.resource.data)
-             || request.resource.data.drawOfferedBy == null
-             || (resource.data.get('drawOfferedBy', null) == null
-                 && request.resource.data.drawOfferedBy == request.auth.uid
-                 && (request.resource.data.drawOfferedBy == resource.data.creatorUid
-                     || request.resource.data.drawOfferedBy == resource.data.opponentUid))
-             || (resource.data.get('drawOfferedBy', null) != null
-                 && (request.resource.data.drawOfferedBy == resource.data.creatorUid
-                     || request.resource.data.drawOfferedBy == resource.data.opponentUid)))
-         && (!('drawOfferTurnCount' in request.resource.data)
-             || request.resource.data.drawOfferTurnCount is int))
+         && resource.data.get('drawOfferedBy', null) != null
+         && resource.data.drawOfferedBy != request.auth.uid
+         && request.resource.data.get('drawOfferedBy', null) == null
+         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'gameStateJson', 'drawOfferedBy', 'lastMoveAt', 'status', 'winner', 'statsByUid', 'lastScoredGameIndex'
+            ]))
+        ||
+        // Cas 2c : Abandon / forfait — autorisé à l'un des deux participants sans modifier gameStateJson.
+        (resource.data.status == 'ongoing'
+         && request.resource.data.status == 'abandoned'
+         && request.resource.data.creatorUid == resource.data.creatorUid
+         && request.resource.data.opponentUid == resource.data.opponentUid
+         && request.auth != null
+         && (request.auth.uid == resource.data.creatorUid
+             || request.auth.uid == resource.data.opponentUid)
+         && request.resource.data.get('drawOfferedBy', null) == null
+         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status', 'winner', 'abandonedBy', 'drawOfferedBy', 'statsByUid', 'lastScoredGameIndex', 'lastMoveAt'
+            ]))
         ||
         // Cas 3 : Revanche (demande, annulation ou relance vers 'ongoing') par l'un des deux participants sans changer creatorUid ni opponentUid
         (resource.data.status in ['finished', 'abandoned']

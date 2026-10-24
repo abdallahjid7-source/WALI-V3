@@ -388,6 +388,9 @@ class FakeWaliOnlineRepository(
         if (current.gameState.phase != Phase.MOVEMENT) {
             return Result.failure(IllegalStateException("Le match nul ne peut être proposé qu'en phase de déplacement"))
         }
+        if (current.gameState.pendingCaptures > 0) {
+            return Result.failure(IllegalStateException("Impossible de proposer un match nul lorsqu'une capture est en attente"))
+        }
         if (current.drawOfferedBy != null) {
             return Result.failure(IllegalStateException("Une proposition de match nul est déjà en attente"))
         }
@@ -423,8 +426,9 @@ class FakeWaliOnlineRepository(
         if (offeredBy == uid) {
             return Result.failure(IllegalStateException("Vous ne pouvez pas répondre à votre propre proposition"))
         }
-        val responderRole = current.getPlayerRole(uid)
-            ?: return Result.failure(IllegalStateException("Vous ne participez pas à cette partie"))
+        if (current.getPlayerRole(uid) == null) {
+            return Result.failure(IllegalStateException("Vous ne participez pas à cette partie"))
+        }
 
         val now = System.currentTimeMillis()
         if (accept) {
@@ -445,15 +449,8 @@ class FakeWaliOnlineRepository(
                 lastMoveAt = now
             )
         } else {
-            val resumedGameState = current.gameState.copy(
-                currentPlayer = responderRole,
-                pendingCaptures = 0,
-                moveHistory = current.gameState.moveHistory + "Proposition de match nul refusée."
-            )
             flow.value = current.copy(
-                gameState = resumedGameState,
                 drawOfferedBy = null,
-                drawOfferTurnCount = resumedGameState.moveHistory.size,
                 lastMoveAt = now
             )
         }
@@ -1821,15 +1818,17 @@ class WaliOnlineTest {
         assertTrue(localVm.uiState.value.isDrawOfferedToMe)
         assertEquals(Player.STICKS, localVm.uiState.value.localDrawOfferedBy)
 
-        // L'adversaire refuse : la partie continue et le tour passe à STONES (celui qui a refusé)
+        // L'adversaire refuse : la partie continue, le proposant (STICKS) garde son tour mais ne peut pas reproposer immédiatement
         localVm.refuseDraw()
         assertFalse(localVm.uiState.value.isDrawOfferPending)
         assertEquals(Phase.MOVEMENT, localVm.uiState.value.gameState.phase)
-        assertEquals(Player.STONES, localVm.uiState.value.gameState.currentPlayer)
-        // Si c'était encore à STICKS au même tour, il ne pourrait pas reproposer immédiatement
+        assertEquals(Player.STICKS, localVm.uiState.value.gameState.currentPlayer)
         assertEquals(Player.STICKS, localVm.uiState.value.localLastDrawProposer)
+        assertFalse(localVm.uiState.value.canProposeDraw)
+        localVm.proposeDraw()
+        assertFalse(localVm.uiState.value.isDrawOfferPending)
 
-        // 2. Vérification en mode en ligne : le même joueur ne peut pas reproposer sans qu'un tour complet se soit écoulé
+        // 2. Vérification en mode en ligne : le proposant garde la main mais ne peut pas reproposer tant qu'un coup n'a pas été joué
         viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
         testScheduler.runCurrent()
         val code = viewModel.uiState.value.waitingForOpponentCode!!
@@ -1847,20 +1846,12 @@ class WaliOnlineTest {
         testScheduler.runCurrent()
         assertEquals("local_user_42", flow.value!!.drawOfferedBy)
 
-        // L'adversaire refuse -> le tour passe à STONES (opponent_99), drawOfferTurnCount = moveHistory.size
+        // L'adversaire refuse -> le tour reste à STICKS (proposant), mais canProposeDraw et proposeDraw restent bloqués
         fakeRepo.respondToDraw(code, accept = false, uid = "opponent_99")
         testScheduler.runCurrent()
 
         assertNull(flow.value!!.drawOfferedBy)
-        assertEquals(Player.STONES, flow.value!!.gameState.currentPlayer)
-        assertFalse(viewModel.uiState.value.canProposeDraw)
-
-        // Même si c'était à nouveau au tour de STICKS sans qu'un coup supplémentaire n'ait augmenté moveHistory.size,
-        // canProposeDraw et proposeDraw restent bloqués tant que moveHistory.size <= drawOfferTurnCount
-        flow.value = flow.value!!.copy(
-            gameState = flow.value!!.gameState.copy(currentPlayer = Player.STICKS)
-        )
-        testScheduler.runCurrent()
+        assertEquals(Player.STICKS, flow.value!!.gameState.currentPlayer)
         assertFalse(viewModel.uiState.value.canProposeDraw)
         assertTrue(fakeRepo.proposeDraw(code, "local_user_42").isFailure)
 
@@ -1892,18 +1883,19 @@ class WaliOnlineTest {
         testScheduler.runCurrent()
         assertEquals("local_user_42", flow.value!!.drawOfferedBy)
 
-        // Refus par opponent_99 (STONES) -> le tour passe à STONES
+        // Refus par opponent_99 (STONES) -> le tour reste à STICKS (proposant), qui ne peut pas reproposer avant d'avoir joué
         fakeRepo.respondToDraw(code, accept = false, uid = "opponent_99")
         testScheduler.runCurrent()
         assertNull(flow.value!!.drawOfferedBy)
-        assertEquals(Player.STONES, flow.value!!.gameState.currentPlayer)
+        assertEquals(Player.STICKS, flow.value!!.gameState.currentPlayer)
+        assertFalse(viewModel.uiState.value.canProposeDraw)
 
-        // Un tour s'écoule : STONES joue un coup valide, le tour revient à STICKS avec moveHistory.size > drawOfferTurnCount
-        val afterOpponentMove = flow.value!!.gameState.copy(
+        // STICKS joue son coup, puis STONES répond : un tour complet s'est écoulé et le tour revient à STICKS avec moveHistory.size > drawOfferTurnCount
+        val afterFullTurn = flow.value!!.gameState.copy(
             currentPlayer = Player.STICKS,
-            moveHistory = flow.value!!.gameState.moveHistory + "F5 -> E5"
+            moveHistory = flow.value!!.gameState.moveHistory + listOf("A1 -> A2", "F5 -> E5")
         )
-        fakeRepo.updateGameState(code, afterOpponentMove)
+        fakeRepo.updateGameState(code, afterFullTurn)
         testScheduler.runCurrent()
 
         // Maintenant STICKS peut à nouveau proposer un match nul
@@ -2534,5 +2526,146 @@ class WaliOnlineTest {
 
         spectatorVm.stopTurnTimer()
         spectatorVm.stopOnlineInactivityMonitoring()
+    }
+
+    @Test
+    fun draw_cannotProposeWhileCaptureIsPending() = runOnlineTest {
+        val capturePendingState = createMovementGameState(
+            currentPlayer = Player.STICKS,
+            moveHistory = listOf("m1", "m2")
+        ).copy(pendingCaptures = 1)
+
+        // 1. En mode local 2 joueurs : canProposeDraw est false et proposeDraw() est ignoré
+        val localStorage = InMemoryWaliGameStorage()
+        localStorage.saveGame(
+            com.example.wali.storage.SavedGame(
+                gameState = capturePendingState,
+                gameMode = GameMode.TWO_PLAYERS,
+                aiDifficulty = com.example.wali.ai.AiDifficulty.MEDIUM,
+                humanPlayer = Player.STICKS
+            )
+        )
+        val localVm = WaliViewModel(storage = localStorage)
+        testScheduler.runCurrent()
+        localVm.resumeSavedGame()
+        testScheduler.runCurrent()
+        localVm.stopTurnTimer()
+
+        assertEquals(1, localVm.uiState.value.gameState.pendingCaptures)
+        assertFalse(localVm.uiState.value.canProposeDraw)
+        localVm.proposeDraw()
+        assertNull(localVm.uiState.value.localDrawOfferedBy)
+        localVm.stopTurnTimer()
+
+        // 2. En mode en ligne : canProposeDraw est false et proposeDraw côté dépôt rejette l'appel
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            gameState = capturePendingState
+        )
+        testScheduler.runCurrent()
+
+        assertEquals(1, viewModel.uiState.value.gameState.pendingCaptures)
+        assertFalse(viewModel.uiState.value.canProposeDraw)
+        viewModel.proposeDraw()
+        testScheduler.runCurrent()
+        assertNull(flow.value!!.drawOfferedBy)
+        assertTrue(fakeRepo.proposeDraw(code, "local_user_42").isFailure)
+    }
+
+    @Test
+    fun draw_refusedWhileCapturePending_preservesPendingCapture() = runOnlineTest {
+        val capturePendingState = createMovementGameState(
+            currentPlayer = Player.STICKS,
+            moveHistory = listOf("m1", "m2")
+        ).copy(pendingCaptures = 1)
+
+        // 1. En mode local 2 joueurs : si une offre était en attente avec pendingCaptures = 1, un refus préserve pendingCaptures = 1 et currentPlayer = STICKS
+        val localStorage = InMemoryWaliGameStorage()
+        localStorage.saveGame(
+            com.example.wali.storage.SavedGame(
+                gameState = capturePendingState.copy(pendingCaptures = 0),
+                gameMode = GameMode.TWO_PLAYERS,
+                aiDifficulty = com.example.wali.ai.AiDifficulty.MEDIUM,
+                humanPlayer = Player.STICKS
+            )
+        )
+        val localVm = WaliViewModel(storage = localStorage)
+        testScheduler.runCurrent()
+        localVm.resumeSavedGame()
+        testScheduler.runCurrent()
+        localVm.stopTurnTimer()
+
+        localVm.proposeDraw()
+        assertEquals(Player.STICKS, localVm.uiState.value.localDrawOfferedBy)
+
+        // Même si l'état porte une capture en attente au moment du refus, respondToDraw(false) ne détruit ni pendingCaptures ni currentPlayer
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            gameState = capturePendingState,
+            drawOfferedBy = "local_user_42",
+            drawOfferTurnCount = 2
+        )
+        testScheduler.runCurrent()
+
+        val result = fakeRepo.respondToDraw(code, accept = false, uid = "opponent_99")
+        testScheduler.runCurrent()
+        assertTrue(result.isSuccess)
+        assertNull(flow.value!!.drawOfferedBy)
+        assertEquals(1, flow.value!!.gameState.pendingCaptures)
+        assertEquals(Player.STICKS, flow.value!!.gameState.currentPlayer)
+        assertEquals(1, viewModel.uiState.value.gameState.pendingCaptures)
+
+        localVm.refuseDraw()
+        assertNull(localVm.uiState.value.localDrawOfferedBy)
+        assertEquals(Player.STICKS, localVm.uiState.value.gameState.currentPlayer)
+        localVm.stopTurnTimer()
+    }
+
+    @Test
+    fun draw_cannotReassignOfferToOpponentWhilePending() = runOnlineTest {
+        viewModel.startCreateOnlineGame(isPublic = true, chosenSide = Player.STICKS)
+        testScheduler.runCurrent()
+
+        val code = viewModel.uiState.value.waitingForOpponentCode!!
+        val flow = fakeRepo.games[code]!!
+        val movementState = createMovementGameState(
+            currentPlayer = Player.STICKS,
+            moveHistory = listOf("m1", "m2")
+        )
+        flow.value = flow.value!!.copy(
+            status = OnlineGameStatus.ONGOING,
+            opponentUid = "opponent_99",
+            opponentPlayer = Player.STONES,
+            players = mapOf("local_user_42" to "STICKS", "opponent_99" to "STONES"),
+            gameState = movementState
+        )
+        testScheduler.runCurrent()
+
+        // local_user_42 propose un match nul
+        assertTrue(fakeRepo.proposeDraw(code, "local_user_42").isSuccess)
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+
+        // Tant que l'offre est en attente, toute tentative de réattribuer drawOfferedBy à opponent_99 échoue
+        assertTrue(fakeRepo.proposeDraw(code, "opponent_99").isFailure)
+        assertTrue(fakeRepo.proposeDraw(code, "local_user_42").isFailure)
+        assertEquals("local_user_42", flow.value!!.drawOfferedBy)
+
+        // Et local_user_42 ne peut jamais accepter lui-même l'offre en cours
+        assertTrue(fakeRepo.respondToDraw(code, accept = true, uid = "local_user_42").isFailure)
+        assertEquals(OnlineGameStatus.ONGOING, flow.value!!.status)
     }
 }

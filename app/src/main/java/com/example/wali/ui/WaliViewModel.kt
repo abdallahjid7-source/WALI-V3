@@ -1409,7 +1409,7 @@ class WaliViewModel(
         when (current.gameMode) {
             GameMode.VS_COMPUTER -> return
             GameMode.TWO_PLAYERS -> {
-                val offeredBy = current.localDrawOfferedBy ?: return
+                if (current.localDrawOfferedBy == null) return
                 if (accept) {
                     stopTurnTimer()
                     aiTurnJob?.cancel()
@@ -1436,25 +1436,13 @@ class WaliViewModel(
                         )
                     }
                 } else {
-                    val refuser = offeredBy.opponent
-                    val baseState = current.gameState.copy(pendingCaptures = 0)
-                    val nextState = if (baseState.currentPlayer != refuser) {
-                        WaliEngine.switchPlayer(baseState)
-                    } else {
-                        baseState
-                    }
                     _uiState.update {
                         it.copy(
-                            gameState = nextState,
                             localDrawOfferedBy = null,
-                            selectedPosition = null,
-                            highlightedMoves = emptySet(),
-                            capturablePositions = emptySet(),
                             feedbackMessage = "Match nul refusé — la partie continue."
                         )
                     }
                     autoSaveGame(_uiState.value)
-                    onTurnTransition()
                 }
             }
             GameMode.ONLINE -> {

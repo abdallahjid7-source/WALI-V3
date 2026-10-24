@@ -145,7 +145,13 @@ data class GameState(
         }
         if (phase == Phase.GAME_OVER &&
             moveHistory.any { it.contains(" posé en ") } &&
-            moveHistory.none { it.contains("Début des déplacements") || it.contains("Début anticipé des déplacements") }
+            moveHistory.none {
+                it.contains("Début des déplacements") ||
+                    it.contains("Début anticipé des déplacements") ||
+                    it.contains("->") ||
+                    it.contains("capturé") ||
+                    it.contains("pion en attente en")
+            }
         ) {
             return Position.PIECES_PER_PLAYER
         }

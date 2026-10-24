@@ -247,6 +247,7 @@ data class WaliUiState(
             if (isSpectator) return false
             if (gameMode == GameMode.VS_COMPUTER) return false
             if (gameState.phase != Phase.MOVEMENT || gameState.winner != null) return false
+            if (gameState.pendingCaptures > 0) return false
             if (isDrawOfferPending) return false
 
             val currentTurnCount = gameState.moveHistory.size

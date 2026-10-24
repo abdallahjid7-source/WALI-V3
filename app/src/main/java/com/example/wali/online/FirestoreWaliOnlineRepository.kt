@@ -340,6 +340,7 @@ class FirestoreWaliOnlineRepository(
             if (!isGameEnding) {
                 val updates = mapOf<String, Any?>(
                     FIELD_GAME_STATE_JSON to stateJson,
+                    FIELD_DRAW_OFFERED_BY to null,
                     FIELD_LAST_MOVE_AT to now
                 )
                 docRef.update(updates).await()
@@ -460,6 +461,9 @@ class FirestoreWaliOnlineRepository(
                 if (session.gameState.phase != com.example.wali.model.Phase.MOVEMENT || session.gameState.winner != null) {
                     throw IllegalStateException("Le match nul ne peut être proposé qu'en phase de déplacement.")
                 }
+                if (session.gameState.pendingCaptures > 0) {
+                    throw IllegalStateException("Impossible de proposer un match nul lorsqu'une capture est en attente.")
+                }
                 if (!session.isPlayerTurn(actorUid)) {
                     throw IllegalStateException("Vous ne pouvez proposer un match nul que pendant votre tour.")
                 }
@@ -541,19 +545,9 @@ class FirestoreWaliOnlineRepository(
                         )
                     )
                 } else {
-                    val refuserRole = session.getPlayerRole(actorUid)
-                    val baseState = session.gameState.copy(pendingCaptures = 0)
-                    val nextState = if (refuserRole != null && baseState.currentPlayer != refuserRole) {
-                        com.example.wali.engine.WaliEngine.switchPlayer(baseState)
-                    } else {
-                        baseState
-                    }
-                    val stateJson = WaliGameSerializer.serializeGameState(nextState)
-
                     transaction.update(
                         docRef,
                         mapOf(
-                            FIELD_GAME_STATE_JSON to stateJson,
                             FIELD_DRAW_OFFERED_BY to null,
                             FIELD_LAST_MOVE_AT to now
                         )
