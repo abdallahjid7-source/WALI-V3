@@ -640,4 +640,431 @@ class WaliAiTest {
             WaliAi.lastSearchCompletedDepth >= 7
         )
     }
+
+    @Test
+    fun ai_hard_capturePlayedMatchesSearchPrincipalVariation() {
+        // Position où STICKS effectue un coup formant un alignement avec plusieurs cibles capturables :
+        // L'IA choisit le coup (from, to) et la variante principale associe à ce coup un captureTarget.
+        // On vérifie que aiMove.captureTarget n'est pas null, et que chooseCaptureTarget consomme
+        // exactement cette même cible sans divergence.
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // STICKS forme la ligne (0,0)-(0,1)-(0,2) en déplaçant (1,2) vers (0,2)
+                Position(0, 0) -> Player.STICKS
+                Position(0, 1) -> Player.STICKS
+                Position(1, 2) -> Player.STICKS
+                Position(3, 0) -> Player.STICKS
+                // STONES possède plusieurs cibles :
+                Position(2, 2) -> Player.STONES
+                Position(4, 2) -> Player.STONES
+                Position(0, 5) -> Player.STONES
+                else -> null
+            }
+        }
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 4,
+            stonesRemaining = 3,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        WaliAi.clearTranspositionTable()
+        val aiMove = WaliAi.chooseMove(state, AiDifficulty.HARD, Random(42), timeBudgetMs = 500L)
+        assertNotNull(aiMove)
+        assertEquals(Position(1, 2), aiMove!!.moveFrom)
+        assertEquals(Position(0, 2), aiMove.moveTo)
+        assertNotNull("La recherche principale doit porter la cible de capture dans la PV", aiMove.captureTarget)
+
+        // Simule la transition moteur vers l'état suivant
+        val nextState = WaliEngine.movePiece(state, aiMove.moveFrom!!, aiMove.moveTo!!)
+        assertTrue(WaliEngine.canCapture(nextState))
+        val capturables = setOf(Position(2, 2), Position(4, 2), Position(0, 5))
+
+        // chooseCaptureTarget consomme la cible issue de la variante principale
+        val captured = WaliAi.chooseCaptureTarget(nextState, capturables, AiDifficulty.HARD, Random(42))
+        assertEquals(aiMove.captureTarget, captured)
+    }
+
+    @Test
+    fun benchmark_versionedReferencePosition_meetsDepthAndSanityGuarantees() {
+        val result = com.example.wali.ai.WaliAiBenchmark.runBenchmark(budgetMs = 1000L)
+        System.err.println("VERSIONED_BENCHMARK_RESULT: ${result.summary()}")
+
+        assertTrue("Profondeur complétée >= 8 (obtenu: ${result.completedDepth})", result.completedDepth >= 8)
+        assertTrue("Nœuds totaux > 0 (obtenu: ${result.totalNodes})", result.totalNodes > 0)
+        assertEquals(
+            "Somme des temps égale au temps mural",
+            result.wallTimeMs,
+            result.timeOrderMovesMs + result.timeEngineMoveMs + result.timeEvalMs + result.timeTtMs + result.timeLegalMovesMs + result.timeOtherMs
+        )
+    }
+
+    @Test
+    fun benchmark_placementEarlyPosition_reportsMetrics() {
+        val result = com.example.wali.ai.WaliAiBenchmark.runPlacementEarlyBenchmark(budgetMs = 1000L)
+        System.err.println("BENCHMARK_PLACEMENT_EARLY: ${result.summary()}")
+        assertTrue(result.completedDepth >= 3)
+        assertTrue(result.totalNodes > 0)
+    }
+
+    @Test
+    fun benchmark_placementMidPosition_reportsMetrics() {
+        val result = com.example.wali.ai.WaliAiBenchmark.runPlacementMidBenchmark(budgetMs = 1000L)
+        System.err.println("BENCHMARK_PLACEMENT_MID: ${result.summary()}")
+        assertTrue(result.completedDepth >= 3)
+        assertTrue(result.totalNodes > 0)
+    }
+
+    @Test
+    fun benchmark_placementTransitionPosition_reportsMetrics() {
+        val result = com.example.wali.ai.WaliAiBenchmark.runPlacementTransitionBenchmark(budgetMs = 1000L)
+        System.err.println("BENCHMARK_PLACEMENT_TRANSITION: ${result.summary()}")
+        assertTrue(result.completedDepth >= 4)
+        assertTrue(result.totalNodes > 0)
+    }
+
+    @Test
+    fun eval_flatArrayOptimization_producesIdenticalScores() {
+        // Garde-fou 2 : Prouve l'équivalence mathématique stricte de evaluateStateDeep
+        // entre la version optimisée par tableau plat et la version logique de référence.
+        val states = listOf(
+            com.example.wali.ai.WaliAiBenchmark.referenceMidGameState,
+            com.example.wali.ai.WaliAiBenchmark.placementEarlyState,
+            com.example.wali.ai.WaliAiBenchmark.placementMidState,
+            com.example.wali.ai.WaliAiBenchmark.placementTransitionState
+        )
+
+        for (state in states) {
+            for (player in listOf(Player.STICKS, Player.STONES)) {
+                val legacyScore = evaluateStateDeepLegacy(state, player)
+                val fastScore = WaliAi.evaluateStateDeep(state, player)
+                assertEquals("Score d'évaluation strictement identique pour $player", legacyScore, fastScore)
+            }
+        }
+
+        // Test sur 20 positions aléatoires supplémentaires
+        val rng = Random(999)
+        for (i in 1..20) {
+            var simState = WaliEngine.initializeGame()
+            val plies = rng.nextInt(2, 40)
+            for (p in 1..plies) {
+                if (simState.winner != null) break
+                val placements = WaliEngine.getValidPlacements(simState)
+                if (placements.isNotEmpty()) {
+                    simState = WaliEngine.placePiece(simState, placements.random(rng), recordHistory = false)
+                } else {
+                    val moves = WaliAi.getAllLegalMoves(simState)
+                    if (moves.isEmpty()) break
+                    val m = moves.random(rng)
+                    simState = WaliEngine.movePiece(simState, m.first, m.second, recordHistory = false)
+                    if (WaliEngine.canCapture(simState)) {
+                        val opp = simState.currentPlayer.opponent
+                        val caps = simState.board.filter { it.value == opp }.keys
+                        if (caps.isNotEmpty()) {
+                            simState = WaliEngine.capturePiece(simState, caps.random(rng), recordHistory = false)
+                        }
+                    }
+                }
+            }
+
+            for (player in listOf(Player.STICKS, Player.STONES)) {
+                val legacyScore = evaluateStateDeepLegacy(simState, player)
+                val fastScore = WaliAi.evaluateStateDeep(simState, player)
+                assertEquals("Score d'évaluation strictement identique position $i pour $player", legacyScore, fastScore)
+            }
+        }
+    }
+
+    @Test
+    fun ai_hard_placementUsesDeepSearch_notTwoPlyHeuristic() {
+        val state = com.example.wali.ai.WaliAiBenchmark.placementEarlyState
+        WaliAi.clearTranspositionTable()
+        val move = WaliAi.chooseMove(state, AiDifficulty.HARD, Random(42), timeBudgetMs = 300L)
+
+        assertNotNull(move)
+        assertNotNull(move!!.placement)
+        assertTrue(move.placement in WaliEngine.getValidPlacements(state))
+        assertTrue(
+            "La phase de pose en niveau Difficile doit utiliser la recherche profonde (profondeur complétée >= 3, obtenu: ${WaliAi.lastSearchCompletedDepth})",
+            WaliAi.lastSearchCompletedDepth >= 3
+        )
+        assertTrue(
+            "Le nombre de nœuds explorés doit attester d'une recherche profonde (nœuds >= 30, obtenu: ${WaliAi.lastSearchNodeCount})",
+            WaliAi.lastSearchNodeCount >= 30
+        )
+    }
+
+    @Test
+    fun ai_hard_placementAvoidsBeingBlockedAtTransition() {
+        // Position de fin de pose (22 pions posés : 11 STICKS et 11 STONES).
+        // Il reste 1 pion à poser pour STICKS (trait à STICKS) puis 1 pion pour STONES,
+        // après quoi transitionToMovement donne le premier coup de déplacement à STICKS (et teste si STICKS est bloqué).
+        //
+        // Grille 5x6 (X = STICKS, O = STONES, . = vide) :
+        // Row 0: X  X  O  O  .  .
+        // Row 1: X  O  X  X  O  O
+        // Row 2: O  X  X  O  .  .
+        // Row 3: X  X  O  .  .  .
+        // Row 4: X  O  X  O  .  O
+        //
+        // Les 11 pions existants de STICKS sont tous enfermés à 0 liberté.
+        // Les 8 cases vides sont réparties en :
+        // - Une poche-piège de 2 cases en haut à droite : (0, 4) et (0, 5), bordée par deux pions STONES en (0, 2) et (0, 3).
+        //   Une heuristique myope (comme evaluatePlacementPos) est attirée par (0, 4) qui bloque la paire adverse (0, 2)-(0, 3).
+        //   Mais si STICKS pose en (0, 4) ou (0, 5), STONES répond immédiatement sur l'autre case de la poche au 24e coup,
+        //   et transitionToMovement déclare STICKS perdant par blocage immédiat (winner = Player.STONES, phase = Phase.GAME_OVER) !
+        // - Une poche de survie de 6 cases en bas à droite : (2, 4), (2, 5), (3, 3), (3, 4), (3, 5), (4, 4).
+        //   Si STICKS pose dans cette poche, il conserve plusieurs libertés après le 24e coup de STONES et survit à la transition.
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                // 11 pions STICKS existants tous enfermés (0 voisin vide)
+                Position(0, 0), Position(0, 1),
+                Position(1, 0), Position(1, 2), Position(1, 3),
+                Position(2, 1), Position(2, 2),
+                Position(3, 0), Position(3, 1),
+                Position(4, 0), Position(4, 2) -> Player.STICKS
+
+                // 11 pions STONES formant la frontière hermétique (sans alignement de 3)
+                Position(0, 2), Position(0, 3),
+                Position(1, 1), Position(1, 4), Position(1, 5),
+                Position(2, 0), Position(2, 3),
+                Position(3, 2),
+                Position(4, 1), Position(4, 3), Position(4, 5) -> Player.STONES
+
+                // 8 cases vides :
+                // - Poche-piège (2 cases) : (0, 4), (0, 5)
+                // - Poche de survie (6 cases) : (2, 4), (2, 5), (3, 3), (3, 4), (3, 5), (4, 4)
+                else -> null
+            }
+        }
+
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.PLACEMENT,
+            sticksRemaining = 1,
+            stonesRemaining = 1,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        // Vérification préalable : si STICKS joue dans la poche-piège (0, 4) et que STONES répond en (0, 5),
+        // transitionToMovement détecte bien le blocage immédiat de STICKS !
+        val afterTrap = WaliEngine.placePiece(state, Position(0, 4), recordHistory = false)
+        val afterStonesReply = WaliEngine.placePiece(afterTrap, Position(0, 5), recordHistory = false)
+        assertEquals(Phase.GAME_OVER, afterStonesReply.phase)
+        assertEquals(Player.STONES, afterStonesReply.winner)
+
+        // L'IA Difficile voit la transition dans son arbre de recherche, écarte les cases pièges (0, 4) et (0, 5),
+        // et choisit une case de la poche de survie où STONES ne peut pas l'étouffer au 24e coup.
+        WaliAi.clearTranspositionTable()
+        val move = WaliAi.chooseMove(state, AiDifficulty.HARD, Random(42), timeBudgetMs = 500L)
+        assertNotNull(move)
+        val chosenPlacement = move!!.placement!!
+        val trapPocket = setOf(Position(0, 4), Position(0, 5))
+        assertTrue(
+            "L'IA Difficile doit éviter la poche-piège $trapPocket menant au blocage à la transition (choisi: $chosenPlacement)",
+            chosenPlacement !in trapPocket
+        )
+
+        // Vérifie que peu importe la réponse légale de STONES au 24e coup, STICKS n'est JAMAIS bloqué à la transition
+        val afterAiMove = WaliEngine.placePiece(state, chosenPlacement, recordHistory = false)
+        for (stonesLastPos in WaliEngine.getValidPlacements(afterAiMove)) {
+            val transitioned = WaliEngine.placePiece(afterAiMove, stonesLastPos, recordHistory = false)
+            assertEquals("La partie doit entrer en phase MOVEMENT sans défaite par blocage", Phase.MOVEMENT, transitioned.phase)
+            assertNull("Aucun vainqueur par blocage à la transition", transitioned.winner)
+            assertTrue("STICKS doit avoir au moins un coup légal en déplacement", WaliEngine.hasLegalMove(transitioned, Player.STICKS))
+        }
+    }
+
+    private fun getNeighborsLegacy(pos: Position): List<Position> {
+        val list = mutableListOf<Position>()
+        if (pos.row > 0) list.add(Position(pos.row - 1, pos.col))
+        if (pos.row < Position.ROWS - 1) list.add(Position(pos.row + 1, pos.col))
+        if (pos.col > 0) list.add(Position(pos.row, pos.col - 1))
+        if (pos.col < Position.COLS - 1) list.add(Position(pos.row, pos.col + 1))
+        return list
+    }
+
+    private fun getEmptyNeighborsLegacy(board: Map<Position, Player?>, pos: Position): Boolean {
+        for (n in getNeighborsLegacy(pos)) {
+            if (board[n] == null) return true
+        }
+        return false
+    }
+
+    private fun evaluateStateDeepLegacy(state: GameState, aiPlayer: Player): Int {
+        if (state.winner != null) {
+            return if (state.winner == aiPlayer) 100_000 else -100_000
+        }
+
+        val opponent = aiPlayer.opponent
+        val aiCount = state.piecesOnBoard(aiPlayer)
+        val oppCount = state.piecesOnBoard(opponent)
+
+        var score = (aiCount - oppCount) * 1200
+        if (state.phase == Phase.MOVEMENT && oppCount <= 3) {
+            score += (4 - oppCount) * 600
+        }
+
+        var aiLiberties = 0
+        var oppLiberties = 0
+        var aiBlockedPieces = 0
+        var oppBlockedPieces = 0
+        var aiCenterPieces = 0
+        var oppCenterPieces = 0
+
+        for ((pos, piece) in state.board) {
+            if (piece == null) continue
+            var liberties = 0
+            val neighbors = getNeighborsLegacy(pos)
+            for (i in 0 until neighbors.size) {
+                if (state.board[neighbors[i]] == null) liberties++
+            }
+
+            val isCenter = pos.row in 1..3 && pos.col in 1..4
+            if (piece == aiPlayer) {
+                aiLiberties += liberties
+                if (liberties == 0) aiBlockedPieces++
+                if (isCenter) aiCenterPieces++
+            } else {
+                oppLiberties += liberties
+                if (liberties == 0) oppBlockedPieces++
+                if (isCenter) oppCenterPieces++
+            }
+        }
+
+        if (state.phase == Phase.MOVEMENT) {
+            if (oppLiberties == 0 && state.currentPlayer == opponent) {
+                return 90_000
+            }
+            if (aiLiberties == 0 && state.currentPlayer == aiPlayer) {
+                return -90_000
+            }
+        }
+
+        var aiDoubleMills = 0
+        var oppDoubleMills = 0
+
+        if (aiCount >= 5 || oppCount >= 5) {
+            for (i in 0 until WaliAi.fastDoubleMillPairs.size) {
+                val pair = WaliAi.fastDoubleMillPairs[i]
+                val pivotPos = Position(pair.pivot / Position.COLS, pair.pivot % Position.COLS)
+                val pivotOwner = state.board[pivotPos] ?: continue
+
+                val a1 = state.board[Position(pair.a1 / Position.COLS, pair.a1 % Position.COLS)] == pivotOwner
+                val a2 = state.board[Position(pair.a2 / Position.COLS, pair.a2 % Position.COLS)] == pivotOwner
+                val b1 = state.board[Position(pair.b1 / Position.COLS, pair.b1 % Position.COLS)] == pivotOwner
+                val b2 = state.board[Position(pair.b2 / Position.COLS, pair.b2 % Position.COLS)] == pivotOwner
+
+                if (a1 && a2 && b1 && b2) {
+                    if (pivotOwner == aiPlayer) aiDoubleMills++ else oppDoubleMills++
+                }
+            }
+        }
+
+        score += aiDoubleMills * 4500
+        score -= oppDoubleMills * 4800
+
+        score += (aiLiberties - oppLiberties) * 35
+        if (oppLiberties in 1..2) score += 2000
+        if (aiLiberties in 1..2) score -= 2500
+
+        score += oppBlockedPieces * 160
+        score -= aiBlockedPieces * 200
+
+        var aiThreats = 0
+        var oppThreats = 0
+        var aiShuttles = 0
+        var oppShuttles = 0
+
+        for (i in 0 until WaliAi.fast38LinePatterns.size) {
+            val pat = WaliAi.fast38LinePatterns[i]
+            val pos0 = Position(pat.c0 / Position.COLS, pat.c0 % Position.COLS)
+            val pos1 = Position(pat.c1 / Position.COLS, pat.c1 % Position.COLS)
+            val pos2 = Position(pat.c2 / Position.COLS, pat.c2 % Position.COLS)
+            val p0 = state.board[pos0]
+            val p1 = state.board[pos1]
+            val p2 = state.board[pos2]
+
+            val c0HasEmpty = getEmptyNeighborsLegacy(state.board, pos0)
+            val c1HasEmpty = getEmptyNeighborsLegacy(state.board, pos1)
+            val c2HasEmpty = getEmptyNeighborsLegacy(state.board, pos2)
+
+            if (p0 == aiPlayer && p1 == aiPlayer && p2 == aiPlayer) {
+                if (c0HasEmpty || c1HasEmpty || c2HasEmpty) {
+                    aiShuttles++
+                }
+                continue
+            } else if (p0 == opponent && p1 == opponent && p2 == opponent) {
+                if (c0HasEmpty || c1HasEmpty || c2HasEmpty) {
+                    oppShuttles++
+                }
+                continue
+            }
+
+            if ((p0 == aiPlayer && p1 == aiPlayer && p2 == null) ||
+                (p0 == aiPlayer && p2 == aiPlayer && p1 == null) ||
+                (p1 == aiPlayer && p2 == aiPlayer && p0 == null)
+            ) {
+                val emptyCell = if (p0 == null) pos0 else if (p1 == null) pos1 else pos2
+                val bBefore = if (pat.boundaryBefore != -1) Position(pat.boundaryBefore / Position.COLS, pat.boundaryBefore % Position.COLS) else null
+                val bAfter = if (pat.boundaryAfter != -1) Position(pat.boundaryAfter / Position.COLS, pat.boundaryAfter % Position.COLS) else null
+                if ((bBefore == null || state.board[bBefore] != aiPlayer) &&
+                    (bAfter == null || state.board[bAfter] != aiPlayer)
+                ) {
+                    val neighbors = getNeighborsLegacy(emptyCell)
+                    var hasFeeder = false
+                    for (k in 0 until neighbors.size) {
+                        val n = neighbors[k]
+                        if (n != pos0 && n != pos1 && n != pos2 && state.board[n] == aiPlayer) {
+                            hasFeeder = true
+                            break
+                        }
+                    }
+                    if (hasFeeder) aiThreats++
+                }
+            } else if ((p0 == opponent && p1 == opponent && p2 == null) ||
+                       (p0 == opponent && p2 == opponent && p1 == null) ||
+                       (p1 == opponent && p2 == opponent && p0 == null)
+            ) {
+                val emptyCell = if (p0 == null) pos0 else if (p1 == null) pos1 else pos2
+                val bBefore = if (pat.boundaryBefore != -1) Position(pat.boundaryBefore / Position.COLS, pat.boundaryBefore % Position.COLS) else null
+                val bAfter = if (pat.boundaryAfter != -1) Position(pat.boundaryAfter / Position.COLS, pat.boundaryAfter % Position.COLS) else null
+                if ((bBefore == null || state.board[bBefore] != opponent) &&
+                    (bAfter == null || state.board[bAfter] != opponent)
+                ) {
+                    val neighbors = getNeighborsLegacy(emptyCell)
+                    var hasFeeder = false
+                    for (k in 0 until neighbors.size) {
+                        val n = neighbors[k]
+                        if (n != pos0 && n != pos1 && n != pos2 && state.board[n] == opponent) {
+                            hasFeeder = true
+                            break
+                        }
+                    }
+                    if (hasFeeder) oppThreats++
+                }
+            }
+        }
+
+        score += aiThreats * 400
+        score -= oppThreats * 600
+        if (aiThreats >= 2) score += 800
+        if (oppThreats >= 2) score -= 1100
+
+        score += aiShuttles * 300
+        score -= oppShuttles * 400
+
+        score += (aiCenterPieces - oppCenterPieces) * 15
+
+        return score
+    }
 }

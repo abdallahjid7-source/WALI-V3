@@ -832,6 +832,7 @@ class WaliEngineTest {
             WaliRuleOptions(mandatoryAlignment = true, defeatAtTwoPieces = true)
         )
 
+        var totalPlacementsVerified = 0
         var totalMovesVerified = 0
         var totalCapturesVerified = 0
 
@@ -847,15 +848,27 @@ class WaliEngineTest {
                         Phase.PLACEMENT -> {
                             val placements = WaliEngine.getValidPlacements(state)
                             if (placements.isEmpty()) break
+                            for (pos in placements) {
+                                val withVal = WaliEngine.placePiece(state, pos, recordHistory = false, validate = true)
+                                val withoutVal = WaliEngine.placePiece(state, pos, recordHistory = false, validate = false)
+                                assertEquals(withVal, withoutVal)
+                                totalPlacementsVerified++
+                            }
                             val chosen = placements.random(rng)
-                            state = WaliEngine.placePiece(state, chosen, recordHistory = false)
+                            state = WaliEngine.placePiece(state, chosen, recordHistory = false, validate = true)
                         }
                         Phase.MOVEMENT -> {
                             if (WaliEngine.isPlacementRequired(state)) {
                                 val placements = WaliEngine.getValidPlacements(state)
                                 if (placements.isEmpty()) break
+                                for (pos in placements) {
+                                    val withVal = WaliEngine.placePiece(state, pos, recordHistory = false, validate = true)
+                                    val withoutVal = WaliEngine.placePiece(state, pos, recordHistory = false, validate = false)
+                                    assertEquals(withVal, withoutVal)
+                                    totalPlacementsVerified++
+                                }
                                 val chosen = placements.random(rng)
-                                state = WaliEngine.placePiece(state, chosen, recordHistory = false)
+                                state = WaliEngine.placePiece(state, chosen, recordHistory = false, validate = true)
                                 continue
                             }
 

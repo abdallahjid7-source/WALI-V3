@@ -173,23 +173,28 @@ object WaliEngine {
     fun placePiece(
         state: GameState,
         position: Position,
-        recordHistory: Boolean = true
+        recordHistory: Boolean = true,
+        validate: Boolean = true
     ): GameState {
-        require(state.winner == null) { "Action impossible : la partie est déjà terminée" }
-        require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
+        if (validate) {
+            require(state.winner == null) { "Action impossible : la partie est déjà terminée" }
+            require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
+        }
 
         if (state.phase == Phase.MOVEMENT) {
             // Pose d'un pion en attente en phase de déplacement (CORRECTION 3)
             val player = state.currentPlayer
-            require(state.hasPendingPlacements(player)) {
-                "Le joueur $player n'a aucun pion en attente de pose"
-            }
-            val validPlacements = getValidPlacements(state)
-            require(validPlacements.isNotEmpty()) {
-                "Aucune case de pose légale disponible ce tour-ci"
-            }
-            require(position in validPlacements) {
-                "Case invalide pour la pose du pion en attente : $position"
+            if (validate) {
+                require(state.hasPendingPlacements(player)) {
+                    "Le joueur $player n'a aucun pion en attente de pose"
+                }
+                val validPlacements = getValidPlacements(state)
+                require(validPlacements.isNotEmpty()) {
+                    "Aucune case de pose légale disponible ce tour-ci"
+                }
+                require(position in validPlacements) {
+                    "Case invalide pour la pose du pion en attente : $position"
+                }
             }
 
             val newBoard = state.board + (position to player)
@@ -224,10 +229,12 @@ object WaliEngine {
             }
         }
 
-        require(state.phase == Phase.PLACEMENT) { "Action impossible : la phase actuelle n'est pas PLACEMENT (${state.phase})" }
-        require(state.board[position] == null) { "Case occupée : $position" }
-        require(!wouldFormLineOfThree(state.board, position, state.currentPlayer)) {
-            "Coup interdit en phase de pose : la pose en $position crée une ligne de 3 pions pour ${state.currentPlayer}"
+        if (validate) {
+            require(state.phase == Phase.PLACEMENT) { "Action impossible : la phase actuelle n'est pas PLACEMENT (${state.phase})" }
+            require(state.board[position] == null) { "Case occupée : $position" }
+            require(!wouldFormLineOfThree(state.board, position, state.currentPlayer)) {
+                "Coup interdit en phase de pose : la pose en $position crée une ligne de 3 pions pour ${state.currentPlayer}"
+            }
         }
 
         val player = state.currentPlayer

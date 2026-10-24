@@ -1049,7 +1049,8 @@ class WaliViewModel(
                         val capturable = nextGameState.board.filter { it.value == opp }.keys
 
                         val target = withContext(Dispatchers.Default) {
-                            WaliAi.chooseCaptureTarget(nextGameState, capturable, difficulty)
+                            aiMove.captureTarget?.takeIf { it in capturable }
+                                ?: WaliAi.chooseCaptureTarget(nextGameState, capturable, difficulty)
                         }
 
                         if (target != null) {
