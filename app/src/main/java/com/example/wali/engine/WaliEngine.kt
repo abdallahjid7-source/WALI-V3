@@ -96,17 +96,22 @@ object WaliEngine {
         sticksPending: Int = 0,
         stonesPending: Int = 0,
         history: List<String>,
-        ruleOptions: WaliRuleOptions = WaliRuleOptions()
+        ruleOptions: WaliRuleOptions = WaliRuleOptions(),
+        recordHistory: Boolean = true
     ): GameState {
-        val transitionMsg = if (sticksPending > 0 || stonesPending > 0) {
-            val pendingDesc = mutableListOf<String>()
-            if (sticksPending > 0) pendingDesc.add("$sticksPending pion(s) BÂTONNETS en attente")
-            if (stonesPending > 0) pendingDesc.add("$stonesPending pion(s) CAILLOUX en attente")
-            "Blocage de pose en fin de phase 1 (${pendingDesc.joinToString(", ")}). Début anticipé des déplacements !"
+        val transitionHistory = if (recordHistory) {
+            val transitionMsg = if (sticksPending > 0 || stonesPending > 0) {
+                val pendingDesc = mutableListOf<String>()
+                if (sticksPending > 0) pendingDesc.add("$sticksPending pion(s) BÂTONNETS en attente")
+                if (stonesPending > 0) pendingDesc.add("$stonesPending pion(s) CAILLOUX en attente")
+                "Blocage de pose en fin de phase 1 (${pendingDesc.joinToString(", ")}). Début anticipé des déplacements !"
+            } else {
+                "Fin de la phase de pose. Début des déplacements."
+            }
+            history + transitionMsg
         } else {
-            "Fin de la phase de pose. Début des déplacements."
+            history
         }
-        val transitionHistory = history + transitionMsg
 
         val sticksOnBoard = newBoard.values.count { it == Player.STICKS }
         val stonesOnBoard = newBoard.values.count { it == Player.STONES }
@@ -132,7 +137,7 @@ object WaliEngine {
             movementState.copy(
                 winner = firstPlayer.opponent,
                 phase = Phase.GAME_OVER,
-                moveHistory = transitionHistory + "$firstPlayer est bloqué dès le départ. Victoire de ${firstPlayer.opponent} !"
+                moveHistory = if (recordHistory) transitionHistory + "$firstPlayer est bloqué dès le départ. Victoire de ${firstPlayer.opponent} !" else transitionHistory
             )
         } else {
             movementState
@@ -165,7 +170,11 @@ object WaliEngine {
      * - En phase de placement (phase 1).
      * - En phase de déplacement (phase 2) si le joueur a au moins un pion en attente.
      */
-    fun placePiece(state: GameState, position: Position): GameState {
+    fun placePiece(
+        state: GameState,
+        position: Position,
+        recordHistory: Boolean = true
+    ): GameState {
         require(state.winner == null) { "Action impossible : la partie est déjà terminée" }
         require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
 
@@ -186,8 +195,12 @@ object WaliEngine {
             val newBoard = state.board + (position to player)
             val newSticksPending = if (player == Player.STICKS) state.sticksPendingPlacement - 1 else state.sticksPendingPlacement
             val newStonesPending = if (player == Player.STONES) state.stonesPendingPlacement - 1 else state.stonesPendingPlacement
-            val historyEntry = "$player a posé son pion en attente en $position"
-            val updatedHistory = state.moveHistory + historyEntry
+            val updatedHistory = if (recordHistory) {
+                val historyEntry = "$player a posé son pion en attente en $position"
+                state.moveHistory + historyEntry
+            } else {
+                state.moveHistory
+            }
 
             val nextPlayer = player.opponent
             val nextState = state.copy(
@@ -204,7 +217,7 @@ object WaliEngine {
                 nextState.copy(
                     winner = player,
                     phase = Phase.GAME_OVER,
-                    moveHistory = updatedHistory + "$nextPlayer est bloqué. Victoire de $player !"
+                    moveHistory = if (recordHistory) updatedHistory + "$nextPlayer est bloqué. Victoire de $player !" else updatedHistory
                 )
             } else {
                 nextState
@@ -222,8 +235,12 @@ object WaliEngine {
 
         val nextSticksToPlace = if (player == Player.STICKS) state.sticksRemaining - 1 else state.sticksRemaining
         val nextStonesToPlace = if (player == Player.STONES) state.stonesRemaining - 1 else state.stonesRemaining
-        val historyEntry = "$player posé en $position"
-        val updatedHistory = state.moveHistory + historyEntry
+        val updatedHistory = if (recordHistory) {
+            val historyEntry = "$player posé en $position"
+            state.moveHistory + historyEntry
+        } else {
+            state.moveHistory
+        }
 
         val totalPlaced = (Position.PIECES_PER_PLAYER - nextSticksToPlace) + (Position.PIECES_PER_PLAYER - nextStonesToPlace)
         val allPiecesPlaced = (totalPlaced == Position.PIECES_PER_PLAYER * 2)
@@ -237,7 +254,8 @@ object WaliEngine {
                 sticksPending = 0,
                 stonesPending = 0,
                 history = updatedHistory,
-                ruleOptions = state.ruleOptions
+                ruleOptions = state.ruleOptions,
+                recordHistory = recordHistory
             )
         }
 
@@ -258,7 +276,8 @@ object WaliEngine {
                 sticksPending = nextSticksToPlace,
                 stonesPending = nextStonesToPlace,
                 history = updatedHistory,
-                ruleOptions = state.ruleOptions
+                ruleOptions = state.ruleOptions,
+                recordHistory = recordHistory
             )
         } else {
             // Poursuite normale de la pose : tour au joueur suivant
@@ -372,7 +391,12 @@ object WaliEngine {
      * Déplace un pion de [from] vers [to].
      * Vérifie la formation de nouvelles lignes de trois (cheval simple ou cheval double).
      */
-    fun movePiece(state: GameState, from: Position, to: Position): GameState {
+    fun movePiece(
+        state: GameState,
+        from: Position,
+        to: Position,
+        recordHistory: Boolean = true
+    ): GameState {
         require(state.phase == Phase.MOVEMENT) { "Action impossible : la phase actuelle n'est pas MOVEMENT (${state.phase})" }
         require(state.winner == null) { "Action impossible : la partie est terminée" }
         require(state.pendingCaptures == 0) { "Capture en attente : vous devez éliminer un pion adverse avant de rejouer" }
@@ -395,8 +419,12 @@ object WaliEngine {
         val allCurrentPlayerLines = detectLines(newBoard, player).toSet()
         val unbrokenUsedLines = state.usedLines.filter { it in allCurrentPlayerLines }.toSet()
 
-        val moveDesc = "$player déplacé de $from vers $to"
-        val updatedHistory = state.moveHistory + moveDesc
+        val updatedHistory = if (recordHistory) {
+            val moveDesc = "$player déplacé de $from vers $to"
+            state.moveHistory + moveDesc
+        } else {
+            state.moveHistory
+        }
 
         return if (newLines.isNotEmpty()) {
             // Une ou plusieurs nouvelles lignes formées !
@@ -413,7 +441,7 @@ object WaliEngine {
                 state.copy(
                     board = newBoard,
                     usedLines = updatedUsedLines,
-                    moveHistory = updatedHistory + "$lineDescription $player doit capturer 1 pion adverse.",
+                    moveHistory = if (recordHistory) updatedHistory + "$lineDescription $player doit capturer 1 pion adverse." else updatedHistory,
                     pendingCaptures = 1
                 )
             } else {
@@ -423,7 +451,7 @@ object WaliEngine {
                     winner = player,
                     phase = Phase.GAME_OVER,
                     usedLines = updatedUsedLines,
-                    moveHistory = updatedHistory + "Plus aucun pion adverse. Victoire de $player !",
+                    moveHistory = if (recordHistory) updatedHistory + "Plus aucun pion adverse. Victoire de $player !" else updatedHistory,
                     pendingCaptures = 0
                 )
             }
@@ -438,7 +466,7 @@ object WaliEngine {
                     winner = player,
                     phase = Phase.GAME_OVER,
                     usedLines = unbrokenUsedLines,
-                    moveHistory = updatedHistory + "Victoire de $player !",
+                    moveHistory = if (recordHistory) updatedHistory + "Victoire de $player !" else updatedHistory,
                     pendingCaptures = 0
                 )
             } else {
@@ -455,7 +483,7 @@ object WaliEngine {
                     nextState.copy(
                         winner = player,
                         phase = Phase.GAME_OVER,
-                        moveHistory = updatedHistory + "$nextPlayer est bloqué (aucun déplacement possible). Victoire de $player !"
+                        moveHistory = if (recordHistory) updatedHistory + "$nextPlayer est bloqué (aucun déplacement possible). Victoire de $player !" else updatedHistory
                     )
                 } else {
                     nextState
@@ -474,7 +502,11 @@ object WaliEngine {
     /**
      * Capture un pion adverse situé à [targetPosition].
      */
-    fun capturePiece(state: GameState, targetPosition: Position): GameState {
+    fun capturePiece(
+        state: GameState,
+        targetPosition: Position,
+        recordHistory: Boolean = true
+    ): GameState {
         require(canCapture(state)) { "Aucune capture n'est autorisée actuellement" }
         val player = state.currentPlayer
         val opponent = player.opponent
@@ -492,8 +524,12 @@ object WaliEngine {
         val allValidLines = (detectLines(newBoard, Player.STICKS) + detectLines(newBoard, Player.STONES)).toSet()
         val updatedUsedLines = state.usedLines.filter { it in allValidLines }.toSet()
 
-        val historyDesc = "$player a capturé le pion adverse en $targetPosition"
-        val updatedHistory = state.moveHistory + historyDesc
+        val updatedHistory = if (recordHistory) {
+            val historyDesc = "$player a capturé le pion adverse en $targetPosition"
+            state.moveHistory + historyDesc
+        } else {
+            state.moveHistory
+        }
 
         val remainingCaptures = state.pendingCaptures - 1
         val opponentPiecesLeft = newBoard.values.count { it == opponent }
@@ -524,7 +560,7 @@ object WaliEngine {
                     winner = player,
                     phase = Phase.GAME_OVER,
                     usedLines = updatedUsedLines,
-                    moveHistory = updatedHistory + "$opponent n'a plus aucun pion. Victoire de $player !",
+                    moveHistory = if (recordHistory) updatedHistory + "$opponent n'a plus aucun pion. Victoire de $player !" else updatedHistory,
                     pendingCaptures = 0
                 )
             } else {
@@ -549,13 +585,13 @@ object WaliEngine {
                     nextState.copy(
                         winner = player,
                         phase = Phase.GAME_OVER,
-                        moveHistory = updatedHistory + "$opponent est réduit à deux pions. Victoire de $player !"
+                        moveHistory = if (recordHistory) updatedHistory + "$opponent est réduit à deux pions. Victoire de $player !" else updatedHistory
                     )
                 } else if (!hasLegalMove(nextState, opponent)) {
                     nextState.copy(
                         winner = player,
                         phase = Phase.GAME_OVER,
-                        moveHistory = updatedHistory + "$opponent est bloqué. Victoire de $player !"
+                        moveHistory = if (recordHistory) updatedHistory + "$opponent est bloqué. Victoire de $player !" else updatedHistory
                     )
                 } else {
                     nextState

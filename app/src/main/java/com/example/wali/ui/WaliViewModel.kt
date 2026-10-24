@@ -90,9 +90,14 @@ class WaliViewModel(
     var rematchTimeoutSeconds: Int = 60
 
     /**
-     * Délai visuel en millisecondes pour rendre le coup de l'IA naturel et lisible.
+     * Délai visuel en millisecondes pour rendre le coup de l'IA naturel et lisible (Facile et Moyen).
      */
     var aiDelayMs: Long = 650L
+
+    /**
+     * Budget de temps de réflexion en millisecondes alloué au niveau Difficile (1000ms par défaut).
+     */
+    var aiThinkBudgetMs: Long = 1000L
 
     init {
         // Chargement et observation des préférences utilisateur (volumes, mute, thème, minuteur)
@@ -934,22 +939,39 @@ class WaliViewModel(
         try {
             _uiState.update { it.copy(isAiThinking = true) }
 
-            // Court délai visuel pour la lisibilité
-            if (aiDelayMs > 0) {
-                delay(aiDelayMs)
-            }
-
             val currentState = _uiState.value.gameState
             val difficulty = _uiState.value.aiDifficulty
+
+            // Court délai visuel pour la lisibilité (uniquement pour Facile / Moyen ; en Difficile l'IA réfléchit activement pendant son budget de calcul)
+            if (difficulty != AiDifficulty.HARD && aiDelayMs > 0) {
+                delay(aiDelayMs)
+            }
 
             if (currentState.phase == Phase.GAME_OVER || currentState.winner != null) {
                 _uiState.update { it.copy(isAiThinking = false) }
                 return
             }
 
-            // Calcul du coup hors thread principal (Dispatchers.Default)
+            val searchStartTime = System.currentTimeMillis()
+
+            // Calcul du coup hors thread principal (Dispatchers.Default) avec budget adapté et interruption coopérative
             val aiMove = withContext(Dispatchers.Default) {
-                WaliAi.chooseMove(currentState, difficulty)
+                val budget = if (difficulty == AiDifficulty.HARD) aiThinkBudgetMs else 100L
+                WaliAi.chooseMove(
+                    state = currentState,
+                    difficulty = difficulty,
+                    timeBudgetMs = budget,
+                    isCancelled = { !coroutineContext.isActive }
+                )
+            }
+
+            // Plancher de temps perçu en mode Difficile (350-450 ms, ici 400 ms) pour éviter les coups instantanés saccadés
+            if (difficulty == AiDifficulty.HARD) {
+                val searchElapsed = System.currentTimeMillis() - searchStartTime
+                val minPerceivedDelay = 400L
+                if (searchElapsed < minPerceivedDelay) {
+                    delay(minPerceivedDelay - searchElapsed)
+                }
             }
 
             if (aiMove == null) {
@@ -1102,6 +1124,7 @@ class WaliViewModel(
     ) {
         audio?.playClick()
         aiTurnJob?.cancel()
+        WaliAi.clearTranspositionTable()
         if (mode != GameMode.ONLINE) {
             stopOnlineInactivityMonitoring()
             onlineSessionJob?.cancel()
@@ -1183,6 +1206,7 @@ class WaliViewModel(
     fun onGameOverContinue() {
         audio?.playClick()
         aiTurnJob?.cancel()
+        WaliAi.clearTranspositionTable()
 
         viewModelScope.launch {
             runCatching {

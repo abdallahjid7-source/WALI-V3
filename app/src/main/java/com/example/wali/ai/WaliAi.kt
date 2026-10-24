@@ -116,12 +116,16 @@ object WaliAi {
 
     /**
      * Calcule le prochain coup pour l'IA selon le niveau de difficulté choisi.
+     * Pour [AiDifficulty.HARD], utilise l'approfondissement itératif avec table de transposition Zobrist
+     * dans la limite du budget de temps [timeBudgetMs], tout en restant interruptible via [isCancelled].
      * Retourne null si aucun coup légal n'existe (par exemple si la partie est terminée).
      */
     fun chooseMove(
         state: GameState,
         difficulty: AiDifficulty,
-        random: Random = Random.Default
+        random: Random = Random.Default,
+        timeBudgetMs: Long = 1000L,
+        isCancelled: () -> Boolean = { false }
     ): AiMove? {
         if (state.phase == Phase.GAME_OVER || state.winner != null) {
             return null
@@ -130,7 +134,7 @@ object WaliAi {
         return when (difficulty) {
             AiDifficulty.EASY -> chooseEasyMove(state, random)
             AiDifficulty.MEDIUM -> chooseMediumMove(state, random)
-            AiDifficulty.HARD -> chooseHardMove(state, random)
+            AiDifficulty.HARD -> chooseHardMove(state, random, timeBudgetMs, isCancelled)
         }
     }
 
@@ -254,7 +258,7 @@ object WaliAi {
 
                 // 1. Coup gagnant direct ou capture immédiate
                 val immediateWinningMoves = allMoves.filter { (from, to) ->
-                    val nextState = WaliEngine.movePiece(state, from, to)
+                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
                     nextState.winner == aiPlayer
                 }
                 if (immediateWinningMoves.isNotEmpty()) {
@@ -263,7 +267,7 @@ object WaliAi {
                 }
 
                 val captureMoves = allMoves.filter { (from, to) ->
-                    val nextState = WaliEngine.movePiece(state, from, to)
+                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
                     WaliEngine.canCapture(nextState)
                 }
                 if (captureMoves.isNotEmpty()) {
@@ -278,7 +282,7 @@ object WaliAi {
                 val bestCandidates = mutableListOf<Pair<Position, Position>>()
 
                 for ((from, to) in ordered) {
-                    val nextState = WaliEngine.movePiece(state, from, to)
+                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
                     val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.MEDIUM, random)
                     val score = minimax(stateAfterAction, depth - 1, Int.MIN_VALUE, Int.MAX_VALUE, false, aiPlayer)
 
@@ -299,10 +303,163 @@ object WaliAi {
     }
 
     // =========================================================================
-    // NIVEAU DIFFICILE (MAÎTRE DU WALI / REDOUTABLE)
+    // HACHAGE ZOBRIST & TABLE DE TRANSPOSITION (NIVEAU DIFFICILE EXPERT)
     // =========================================================================
 
-    private fun chooseHardMove(state: GameState, random: Random): AiMove? {
+    enum class TtBound { EXACT, LOWER, UPPER }
+
+    class SearchTimeoutException : Exception()
+
+    private object Zobrist {
+        val cells: Array<LongArray> = Array(Position.TOTAL_CELLS) { LongArray(2) }
+        val turnStones: Long
+        val phase: LongArray = LongArray(Phase.values().size)
+        val pendingCaptures: LongArray = LongArray(4)
+        val sticksRemaining: LongArray = LongArray(13)
+        val stonesRemaining: LongArray = LongArray(13)
+        val sticksPending: LongArray = LongArray(13)
+        val stonesPending: LongArray = LongArray(13)
+
+        init {
+            val rng = Random(0x504E474841494CL) // "PNGHAI" seed déterministe
+            for (i in 0 until Position.TOTAL_CELLS) {
+                cells[i][0] = rng.nextLong()
+                cells[i][1] = rng.nextLong()
+            }
+            turnStones = rng.nextLong()
+            for (i in phase.indices) phase[i] = rng.nextLong()
+            for (i in pendingCaptures.indices) pendingCaptures[i] = rng.nextLong()
+            for (i in sticksRemaining.indices) sticksRemaining[i] = rng.nextLong()
+            for (i in stonesRemaining.indices) stonesRemaining[i] = rng.nextLong()
+            for (i in sticksPending.indices) sticksPending[i] = rng.nextLong()
+            for (i in stonesPending.indices) stonesPending[i] = rng.nextLong()
+        }
+    }
+
+    /**
+     * Calcule l'empreinte Zobrist complète 64-bit d'une position de jeu.
+     * Prend en compte l'occupation des 30 cases, le trait, la phase, les réserves,
+     * les poses différées et l'état de capture en attente pour garantir zéro fausse collision.
+     */
+    fun computeZobristHash(state: GameState): Long {
+        var h = 0L
+        for ((pos, piece) in state.board) {
+            if (piece != null) {
+                val cellIdx = pos.row * Position.COLS + pos.col
+                val pieceIdx = if (piece == Player.STICKS) 0 else 1
+                h = h xor Zobrist.cells[cellIdx][pieceIdx]
+            }
+        }
+        if (state.currentPlayer == Player.STONES) {
+            h = h xor Zobrist.turnStones
+        }
+        h = h xor Zobrist.phase[state.phase.ordinal]
+        h = h xor Zobrist.pendingCaptures[state.pendingCaptures.coerceIn(0, 3)]
+        h = h xor Zobrist.sticksRemaining[state.sticksRemaining.coerceIn(0, 12)]
+        h = h xor Zobrist.stonesRemaining[state.stonesRemaining.coerceIn(0, 12)]
+        h = h xor Zobrist.sticksPending[state.sticksPendingPlacement.coerceIn(0, 12)]
+        h = h xor Zobrist.stonesPending[state.stonesPendingPlacement.coerceIn(0, 12)]
+        return h
+    }
+
+    /**
+     * Table de transposition compacte et ultra-rapide (2^18 = 262 144 entrées).
+     * Stocke sans aucune allocation d'objet : clé Zobrist, profondeur, score, type de borne et meilleur coup.
+     */
+    private const val TT_SIZE_BITS = 18
+    private const val TT_SIZE = 1 shl TT_SIZE_BITS
+    private const val TT_MASK = TT_SIZE - 1
+
+    private val ttKeys = LongArray(TT_SIZE)
+    private val ttDepths = IntArray(TT_SIZE)
+    private val ttScores = IntArray(TT_SIZE)
+    private val ttBounds = ByteArray(TT_SIZE)
+    private val ttFromRow = ByteArray(TT_SIZE) { -1 }
+    private val ttFromCol = ByteArray(TT_SIZE) { -1 }
+    private val ttToRow = ByteArray(TT_SIZE) { -1 }
+    private val ttToCol = ByteArray(TT_SIZE) { -1 }
+
+    var isTranspositionTableEnabled: Boolean = true
+    var lastSearchCompletedDepth: Int = 0
+    var lastSearchNodeCount: Int = 0
+
+    fun clearTranspositionTable() {
+        ttKeys.fill(0L)
+        ttDepths.fill(0)
+        ttScores.fill(0)
+        ttBounds.fill(0)
+        ttFromRow.fill(-1)
+        ttFromCol.fill(-1)
+        ttToRow.fill(-1)
+        ttToCol.fill(-1)
+    }
+
+    private fun ttLookup(key: Long): TtLookupResult? {
+        if (!isTranspositionTableEnabled) return null
+        val idx = key.toInt() and TT_MASK
+        val boundByte = ttBounds[idx].toInt()
+        if (boundByte == 0 || ttKeys[idx] != key) return null
+
+        val bestMove = if (ttFromRow[idx] >= 0) {
+            Pair(
+                Position(ttFromRow[idx].toInt(), ttFromCol[idx].toInt()),
+                Position(ttToRow[idx].toInt(), ttToCol[idx].toInt())
+            )
+        } else null
+
+        val bound = when (boundByte) {
+            1 -> TtBound.EXACT
+            2 -> TtBound.LOWER
+            3 -> TtBound.UPPER
+            else -> return null
+        }
+        return TtLookupResult(ttDepths[idx], ttScores[idx], bound, bestMove)
+    }
+
+    private fun ttStore(key: Long, depth: Int, score: Int, bound: TtBound, bestMove: Pair<Position, Position>?) {
+        if (!isTranspositionTableEnabled) return
+        val idx = key.toInt() and TT_MASK
+        if (ttBounds[idx].toInt() == 0 || ttKeys[idx] == key || depth >= ttDepths[idx]) {
+            ttKeys[idx] = key
+            ttDepths[idx] = depth
+            ttScores[idx] = score
+            ttBounds[idx] = when (bound) {
+                TtBound.EXACT -> 1
+                TtBound.LOWER -> 2
+                TtBound.UPPER -> 3
+            }.toByte()
+
+            if (bestMove != null) {
+                ttFromRow[idx] = bestMove.first.row.toByte()
+                ttFromCol[idx] = bestMove.first.col.toByte()
+                ttToRow[idx] = bestMove.second.row.toByte()
+                ttToCol[idx] = bestMove.second.col.toByte()
+            } else {
+                ttFromRow[idx] = -1
+                ttFromCol[idx] = -1
+                ttToRow[idx] = -1
+                ttToCol[idx] = -1
+            }
+        }
+    }
+
+    private data class TtLookupResult(
+        val depth: Int,
+        val score: Int,
+        val bound: TtBound,
+        val bestMove: Pair<Position, Position>?
+    )
+
+    // =========================================================================
+    // NIVEAU DIFFICILE (MAÎTRE DU WALI / RECHERCHE PROFONDE AVEC BUDGET TEMPS)
+    // =========================================================================
+
+    private fun chooseHardMove(
+        state: GameState,
+        random: Random,
+        timeBudgetMs: Long,
+        isCancelled: () -> Boolean
+    ): AiMove? {
         return when (state.phase) {
             Phase.PLACEMENT -> {
                 val validPlacements = WaliEngine.getValidPlacements(state)
@@ -316,7 +473,7 @@ object WaliAi {
                     val baseScore = evaluatePlacementPos(state, aiPlayer, pos)
 
                     // Simulation du contre adverse le plus menaçant
-                    val nextState = WaliEngine.placePiece(state, pos)
+                    val nextState = WaliEngine.placePiece(state, pos, recordHistory = false)
                     val oppBestResponse = if (nextState.phase == Phase.PLACEMENT) {
                         val oppPlacements = WaliEngine.getValidPlacements(nextState)
                         if (oppPlacements.isEmpty()) 0
@@ -351,59 +508,258 @@ object WaliAi {
 
                 // 1. Détection immédiate des coups gagnants à 1 temps
                 for ((from, to) in allMoves) {
-                    val nextState = WaliEngine.movePiece(state, from, to)
+                    val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
                     if (nextState.winner == aiPlayer) {
+                        lastSearchCompletedDepth = 1
+                        lastSearchNodeCount = 1
                         return AiMove(moveFrom = from, moveTo = to)
                     }
                     if (WaliEngine.canCapture(nextState)) {
                         val oppPieces = nextState.board.filter { it.value == aiPlayer.opponent }.keys
                         for (target in oppPieces) {
-                            val afterCapture = WaliEngine.capturePiece(nextState, target)
+                            val afterCapture = WaliEngine.capturePiece(nextState, target, recordHistory = false)
                             if (afterCapture.winner == aiPlayer) {
+                                lastSearchCompletedDepth = 1
+                                lastSearchNodeCount = 1
                                 return AiMove(moveFrom = from, moveTo = to)
                             }
                         }
                     }
                 }
 
-                // 2. Recherche Alpha-Beta approfondie (profondeur 4 à 5 selon le nombre de pions)
-                val totalPieces = state.board.values.count { it != null }
-                val searchDepth = if (totalPieces <= 14) 5 else 4
+                // 2. Approfondissement itératif avec table de transposition Zobrist et budget de temps réel
+                val startTime = System.currentTimeMillis()
+                val deadline = startTime + timeBudgetMs
+                val nodeCounter = IntArray(1)
 
-                val orderedMoves = orderMoves(state, allMoves, aiPlayer)
-                var bestScore = Int.MIN_VALUE
-                val bestMoves = mutableListOf<Pair<Position, Position>>()
+                var completedBestMove: Pair<Position, Position>? = null
+                var completedBestScore = Int.MIN_VALUE
+                var lastCompletedDepth = 0
 
-                for ((from, to) in orderedMoves) {
-                    val nextState = WaliEngine.movePiece(state, from, to)
-                    val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, random)
-                    val score = minimax(
-                        state = stateAfterAction,
-                        depth = searchDepth - 1,
-                        alpha = bestScore.coerceAtLeast(Int.MIN_VALUE + 1000),
-                        beta = Int.MAX_VALUE,
-                        isMaximizing = false,
-                        aiPlayer = aiPlayer
-                    )
+                // Pré-tri initial des coups
+                var moveList = orderMoves(state, allMoves, aiPlayer)
+                completedBestMove = moveList.firstOrNull()
 
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestMoves.clear()
-                        bestMoves.add(from to to)
-                    } else if (score == bestScore) {
-                        bestMoves.add(from to to)
+                for (targetDepth in 1..24) {
+                    // S'il reste moins de 20ms de budget, ne pas lancer une nouvelle profondeur
+                    val now = System.currentTimeMillis()
+                    if (targetDepth > 1 && (now >= deadline - 20L || isCancelled())) {
+                        break
+                    }
+
+                    var iterationBestMove: Pair<Position, Position>? = null
+                    var iterationBestScore = Int.MIN_VALUE
+                    var interrupted = false
+
+                    // Si on a un coup préféré de l'itération précédente, le placer impérativement en tête
+                    if (completedBestMove != null) {
+                        moveList = listOf(completedBestMove) + moveList.filter { it != completedBestMove }
+                    }
+
+                    var alpha = Int.MIN_VALUE + 1000
+                    val beta = Int.MAX_VALUE
+
+                    for ((from, to) in moveList) {
+                        if (isCancelled() || System.currentTimeMillis() >= deadline) {
+                            interrupted = true
+                            break
+                        }
+
+                        val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                        val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, random)
+
+                        val score = try {
+                            minimaxAlphaBeta(
+                                state = stateAfterAction,
+                                depth = targetDepth - 1,
+                                alpha = alpha,
+                                beta = beta,
+                                isMaximizing = false,
+                                aiPlayer = aiPlayer,
+                                deadline = deadline,
+                                isCancelled = isCancelled,
+                                nodeCount = nodeCounter
+                            )
+                        } catch (e: SearchTimeoutException) {
+                            interrupted = true
+                            break
+                        }
+
+                        if (score > iterationBestScore) {
+                            iterationBestScore = score
+                            iterationBestMove = from to to
+                        }
+                        alpha = maxOf(alpha, score)
+                    }
+
+                    // Ne sauvegarder le meilleur coup QUE si l'itération entière s'est terminée avec succès
+                    if (!interrupted && iterationBestMove != null) {
+                        completedBestMove = iterationBestMove
+                        completedBestScore = iterationBestScore
+                        lastCompletedDepth = targetDepth
+
+                        // Si gain forcé absolu trouvé, arrêter la recherche immédiatement
+                        if (completedBestScore >= 90_000) {
+                            break
+                        }
+                    } else {
+                        break // Interrompu par timeout ou annulation : on conserve completedBestMove de l'itération précédente
                     }
                 }
 
-                val chosen = (bestMoves.ifEmpty { allMoves }).random(random)
+                lastSearchCompletedDepth = lastCompletedDepth
+                lastSearchNodeCount = nodeCounter[0]
+
+                val chosen = completedBestMove ?: allMoves.first()
                 AiMove(moveFrom = chosen.first, moveTo = chosen.second)
             }
             Phase.GAME_OVER -> null
         }
     }
 
+    /**
+     * Recherche Minimax Alpha-Bêta optimisée avec table de transposition Zobrist.
+     * Utilise exclusivement [WaliEngine] pour chaque coup, transition et capture.
+     */
+    private fun minimaxAlphaBeta(
+        state: GameState,
+        depth: Int,
+        alpha: Int,
+        beta: Int,
+        isMaximizing: Boolean,
+        aiPlayer: Player,
+        deadline: Long,
+        isCancelled: () -> Boolean,
+        nodeCount: IntArray
+    ): Int {
+        // Vérification coopérative du timeout tous les 64 nœuds pour minimiser le coût système
+        nodeCount[0]++
+        if ((nodeCount[0] and 63) == 0) {
+            if (isCancelled() || System.currentTimeMillis() >= deadline) {
+                throw SearchTimeoutException()
+            }
+        }
+
+        // État terminal (victoire ou défaite)
+        if (state.winner != null) {
+            return if (state.winner == aiPlayer) 100_000 + depth else -100_000 - depth
+        }
+
+        // Profondeur atteinte : évaluation heuristique de la position
+        if (depth <= 0) {
+            return evaluateStateDeep(state, aiPlayer)
+        }
+
+        val hash = computeZobristHash(state)
+        val ttEntry = ttLookup(hash)
+        var currentAlpha = alpha
+        var currentBeta = beta
+
+        if (ttEntry != null && ttEntry.depth >= depth) {
+            when (ttEntry.bound) {
+                TtBound.EXACT -> return ttEntry.score
+                TtBound.LOWER -> currentAlpha = maxOf(currentAlpha, ttEntry.score)
+                TtBound.UPPER -> currentBeta = minOf(currentBeta, ttEntry.score)
+            }
+            if (currentAlpha >= currentBeta) {
+                return ttEntry.score
+            }
+        }
+
+        val moves = getAllLegalMoves(state)
+        if (moves.isEmpty()) {
+            // Aucun coup légal : le joueur actif est étouffé (défaite par blocage)
+            return if (isMaximizing) -100_000 - depth else 100_000 + depth
+        }
+
+        val currentPlayer = if (isMaximizing) aiPlayer else aiPlayer.opponent
+        val orderedMoves = orderMovesWithTt(state, moves, currentPlayer, ttEntry?.bestMove)
+
+        var bestMoveThisNode: Pair<Position, Position>? = null
+
+        if (isMaximizing) {
+            var maxEval = Int.MIN_VALUE
+            for ((from, to) in orderedMoves) {
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, Random.Default)
+                val eval = minimaxAlphaBeta(
+                    state = stateAfterAction,
+                    depth = depth - 1,
+                    alpha = currentAlpha,
+                    beta = currentBeta,
+                    isMaximizing = false,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+
+                if (eval > maxEval) {
+                    maxEval = eval
+                    bestMoveThisNode = from to to
+                }
+                currentAlpha = maxOf(currentAlpha, eval)
+                if (currentBeta <= currentAlpha) break // Coupe Bêta
+            }
+
+            val bound = when {
+                maxEval <= alpha -> TtBound.UPPER
+                maxEval >= beta -> TtBound.LOWER
+                else -> TtBound.EXACT
+            }
+            ttStore(hash, depth, maxEval, bound, bestMoveThisNode)
+            return maxEval
+        } else {
+            var minEval = Int.MAX_VALUE
+            val oppPlayer = aiPlayer.opponent
+            for ((from, to) in orderedMoves) {
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                val stateAfterAction = resolveAiCapturesForSimulation(nextState, oppPlayer, AiDifficulty.HARD, Random.Default)
+                val eval = minimaxAlphaBeta(
+                    state = stateAfterAction,
+                    depth = depth - 1,
+                    alpha = currentAlpha,
+                    beta = currentBeta,
+                    isMaximizing = true,
+                    aiPlayer = aiPlayer,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                    nodeCount = nodeCount
+                )
+
+                if (eval < minEval) {
+                    minEval = eval
+                    bestMoveThisNode = from to to
+                }
+                currentBeta = minOf(currentBeta, eval)
+                if (currentBeta <= currentAlpha) break // Coupe Alpha
+            }
+
+            val bound = when {
+                minEval <= alpha -> TtBound.UPPER
+                minEval >= beta -> TtBound.LOWER
+                else -> TtBound.EXACT
+            }
+            ttStore(hash, depth, minEval, bound, bestMoveThisNode)
+            return minEval
+        }
+    }
+
+    private fun orderMovesWithTt(
+        state: GameState,
+        moves: List<Pair<Position, Position>>,
+        player: Player,
+        ttMove: Pair<Position, Position>?
+    ): List<Pair<Position, Position>> {
+        val ordered = orderMoves(state, moves, player)
+        if (ttMove != null && ttMove in moves) {
+            return listOf(ttMove) + ordered.filter { it != ttMove }
+        }
+        return ordered
+    }
+
     // =========================================================================
-    // MINIMAX AVEC ÉLAGAGE ALPHA-BETA ET ÉVALUATION HEURISTIQUE RICHE
+    // MINIMAX NIVEAU MOYEN (INCHANGÉ — PROFONDEUR FIXE 3)
     // =========================================================================
 
     private fun minimax(
@@ -431,14 +787,13 @@ object WaliAi {
             var maxEval = Int.MIN_VALUE
             val moves = getAllLegalMoves(state)
             if (moves.isEmpty()) {
-                // Aucun coup légal -> défaite immédiate par blocage
                 return -100_000 - depth
             }
 
             val ordered = orderMoves(state, moves, aiPlayer)
             for ((from, to) in ordered) {
-                val nextState = WaliEngine.movePiece(state, from, to)
-                val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.HARD, Random.Default)
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                val stateAfterAction = resolveAiCapturesForSimulation(nextState, aiPlayer, AiDifficulty.MEDIUM, Random.Default)
                 val eval = minimax(stateAfterAction, depth - 1, currentAlpha, currentBeta, false, aiPlayer)
 
                 maxEval = maxOf(maxEval, eval)
@@ -451,14 +806,13 @@ object WaliAi {
             val oppPlayer = aiPlayer.opponent
             val moves = getAllLegalMoves(state)
             if (moves.isEmpty()) {
-                // L'adversaire est bloqué -> victoire immédiate de l'IA !
                 return 100_000 + depth
             }
 
             val ordered = orderMoves(state, moves, oppPlayer)
             for ((from, to) in ordered) {
-                val nextState = WaliEngine.movePiece(state, from, to)
-                val stateAfterAction = resolveAiCapturesForSimulation(nextState, oppPlayer, AiDifficulty.HARD, Random.Default)
+                val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
+                val stateAfterAction = resolveAiCapturesForSimulation(nextState, oppPlayer, AiDifficulty.MEDIUM, Random.Default)
                 val eval = minimax(stateAfterAction, depth - 1, currentAlpha, currentBeta, true, aiPlayer)
 
                 minEval = minOf(minEval, eval)
@@ -476,13 +830,14 @@ object WaliAi {
         state: GameState,
         playerWhoMoved: Player,
         difficulty: AiDifficulty,
-        random: Random
+        random: Random,
+        recordHistory: Boolean = false
     ): GameState {
         if (!WaliEngine.canCapture(state)) return state
         val targetOpponent = playerWhoMoved.opponent
         val capturables = state.board.filter { it.value == targetOpponent }.keys
         val bestTarget = chooseCaptureTarget(state, capturables, difficulty, random) ?: return state
-        return WaliEngine.capturePiece(state, bestTarget)
+        return WaliEngine.capturePiece(state, bestTarget, recordHistory = recordHistory)
     }
 
     // =========================================================================
@@ -509,7 +864,7 @@ object WaliAi {
             var priority = 0
 
             // 1. Capture immédiate permise par ce coup
-            val nextState = WaliEngine.movePiece(state, from, to)
+            val nextState = WaliEngine.movePiece(state, from, to, recordHistory = false)
             if (WaliEngine.canCapture(nextState) || nextState.winner == player) {
                 priority += 25_000
             }

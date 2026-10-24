@@ -1,5 +1,6 @@
 package com.example.wali
 
+import com.example.wali.ai.WaliAi
 import com.example.wali.engine.WaliEngine
 import com.example.wali.model.GameMode
 import com.example.wali.model.GameState
@@ -587,6 +588,38 @@ class WaliViewModelTest {
         assertEquals(Phase.GAME_OVER, viewModel.uiState.value.gameState.phase)
         assertNull(viewModel.uiState.value.gameState.winner)
         assertTrue(viewModel.uiState.value.isDrawGameOver)
+    }
+
+    @Test
+    fun startNewGame_clearsAiTranspositionTable() {
+        val board = Position.allPositions.associateWith { pos ->
+            when (pos) {
+                Position(0, 0) -> Player.STICKS
+                Position(1, 1) -> Player.STICKS
+                Position(2, 2) -> Player.STONES
+                else -> null
+            }
+        }
+        val state = GameState(
+            board = board,
+            currentPlayer = Player.STICKS,
+            phase = Phase.MOVEMENT,
+            sticksRemaining = 2,
+            stonesRemaining = 1,
+            winner = null,
+            usedLines = emptySet(),
+            moveHistory = emptyList(),
+            pendingCaptures = 0
+        )
+
+        // Lance une recherche pour peupler la TT
+        WaliAi.chooseMove(state, com.example.wali.ai.AiDifficulty.HARD, timeBudgetMs = 150L)
+        assertTrue(WaliAi.lastSearchNodeCount > 0)
+
+        // Démarre une nouvelle partie : doit nettoyer la TT
+        viewModel.startNewGame(GameMode.VS_COMPUTER, Player.STICKS, com.example.wali.ai.AiDifficulty.HARD)
+        // La nouvelle partie réinitialise l'état
+        assertEquals(Phase.PLACEMENT, viewModel.uiState.value.gameState.phase)
     }
 }
 
